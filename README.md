@@ -277,8 +277,13 @@ The script is designed for a **finite provider token budget**:
   local regex/NER extractor) is deleted and reprocessed.
 - **Budget aware.** When the provider refuses a request, the backend records the failure
   in the evidence item's `job.warnings`; the script reads the provider's own retry hint
-  from that warning, waits exactly that long, and retries the same file. It never
-  guesses a shorter wait and never hammers an exhausted budget.
+  from that warning and waits for it, then retries the same file. It never guesses a
+  shorter wait and never hammers an exhausted budget.
+- **Waits for the whole document.** The provider's hint covers the request that was
+  refused, and a document is extracted in several chunks that are charged against the
+  same budget. The script therefore waits for the budget to refill with the document's
+  own cost as well, so a document is not paid for twice and refused half way through.
+  `--chunk-chars` tells the worker which chunk size its server runs with.
 - **Per-file tolerance.** One bad document never aborts the run.
 
 Extraction cost is real: one narrative PDF is roughly 1500-2500 prompt + 1000-2200 output
@@ -310,9 +315,10 @@ $env:ATLAS_PORT=8000; $env:LLM_MODEL="openai/gpt-oss-120b"; python run.py
 $env:ATLAS_PORT=8001; $env:LLM_MODEL="qwen/qwen3.8-27b"
 $env:LLM_CHUNK_CHARS=3000; $env:LLM_MAX_COMPLETION_TOKENS=1000; python run.py
 
-# Two workers, disjoint shards of the same dataset
-python scripts/ingest_dataset.py --base http://127.0.0.1:8000 --shard 0 --num-shards 2
-python scripts/ingest_dataset.py --base http://127.0.0.1:8001 --shard 1 --num-shards 2
+# Two workers, disjoint shards of the same dataset.
+# --chunk-chars must match the LLM_CHUNK_CHARS of the server each worker talks to.
+python scripts/ingest_dataset.py --base http://127.0.0.1:8000 --shard 0 --num-shards 2 --chunk-chars 12000
+python scripts/ingest_dataset.py --base http://127.0.0.1:8001 --shard 1 --num-shards 2 --chunk-chars 3000
 ```
 
 `qwen/qwen3.8-27b` is capped by the provider at 1000 output tokens per minute, so it needs
