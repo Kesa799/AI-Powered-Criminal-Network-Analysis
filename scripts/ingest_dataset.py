@@ -1,0 +1,377 @@
+"""Bulk ingest the SFIC_DATASET into ATLAS (Postgres + Neo4j Aura).
+
+Design notes
+------------
+* **Resumable.** Files already present in the case's evidence list are skipped,
+  so the script can be re-run across days without re-spending LLM tokens.
+* **Round-robin across cases.** Narrative PDFs are consumed one per case in
+  turn, so every case gains narrative evidence early instead of one case
+  absorbing the whole daily token budget.
+* **Budget aware.** The Groq tier this deployment uses allows a finite number
+  of tokens per day. When the provider starts refusing requests the backend
+  records the failure in the evidence item's ``job.warnings``; this script
+  detects that and stops cleanly instead of hammering the provider.
+* **Per-file tolerance.** One bad file never aborts the run.
+
+Usage:
+    python scripts/ingest_dataset.py                 # all cases, resumable
+    python scripts/ingest_dataset.py --max-files 20  # stop after 20 files
+    python scripts/ingest_dataset.py --kind pdf      # only pdf (or xlsx)
+    python scripts/ingest_dataset.py --cases CASE_001 CASE_002
+    python scripts/ingest_dataset.py --dry-run
+"""
+from __future__ import annotations
+
+import argparse
+import re
+import sys
+import time
+from collections import deque
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional, Tuple
+
+import requests
+
+from evidence_provenance import has_model_derived_mentions
+
+ROOT = Path(__file__).resolve().parent.parent
+DATASET = ROOT.parent / "SFIC_DATASET"
+BASE = "http://127.0.0.1:8000"
+BADGE = "IND-LE-8402"
+PASSWORD = "password123"
+OFFICER = "Inspector Vikram Rathore"
+
+# Backoff between retries of a failed upload. The backend's database lives
+# behind a remote pooler, so a transient DNS failure there shows up as a 500.
+RETRY_BACKOFF_S = 20.0
+
+# When the provider refuses because its daily token budget is spent it states
+# when to try again. Honouring that hint paces the ingest to the provider's
+# own budget instead of hammering it.
+MAX_QUOTA_RETRIES = 3
+MAX_QUOTA_WAIT_S = 3600.0
+
+# Substrings that identify a provider refusal in a job warning.
+RATE_LIMIT_MARKERS = (
+    "rate limit",
+    "rate_limit",
+    "429",
+    "tokens per day",
+    "tokens per minute",
+    "retry",
+    "quota",
+)
+
+session = requests.Session()
+
+
+def login() -> None:
+    r = session.post(
+        f"{BASE}/api/auth/login",
+        json={"badgeNumber": BADGE, "password": PASSWORD},
+        timeout=30,
+    )
+    r.raise_for_status()
+    session.headers.update({"Authorization": f"Bearer {r.json()['token']}"})
+    print("[auth] ok", flush=True)
+
+
+def existing_evidence(case_id: str) -> Tuple[set[str], Dict[str, str]]:
+    """Split a case's evidence into (usable filenames, stale filename -> id).
+
+    A file counts as usable only when the model produced its mentions. A row
+    that holds nothing, a row whose mentions came from the local regex/NER
+    extractor, and a row whose pipeline run was refused by the provider are
+    all worth reprocessing.
+    """
+    r = session.get(f"{BASE}/api/evidence", params={"case_id": case_id, "limit": 1000}, timeout=120)
+    r.raise_for_status()
+    usable: set[str] = set()
+    stale: Dict[str, str] = {}
+    for item in r.json().get("items", []):
+        job = item.get("job", {}) or {}
+        name = item.get("filename")
+        if not name:
+            continue
+        warnings = " ".join(str(w) for w in (job.get("warnings") or [])).lower()
+        used_local_extractor = "ner extractor" in warnings or "regex" in warnings
+        has_mentions = (job.get("mention_count") or 0) > 0 and job.get("status") != "Failed"
+
+        if not has_mentions or used_local_extractor:
+            stale[name] = item.get("evidence_id")
+            continue
+
+        if name.lower().endswith(".pdf"):
+            # A PDF is extracted by the model; a row that only holds locally
+            # extracted mentions was never really read by the model.
+            derived = has_model_derived_mentions(session, BASE, item.get("evidence_id"))
+            if derived is False:
+                stale[name] = item.get("evidence_id")
+                continue
+
+        usable.add(name)
+    return usable, stale
+
+
+def delete_evidence(evidence_id: str) -> bool:
+    try:
+        r = session.delete(f"{BASE}/api/evidence/{evidence_id}", timeout=60)
+        return r.status_code < 400
+    except Exception:
+        return False
+
+
+def round_robin(groups: List[List]) -> Iterable:
+    """Yield items from each group in turn, so every group advances evenly."""
+    idx = 0
+    while any(idx < len(g) for g in groups):
+        for g in groups:
+            if idx < len(g):
+                yield g[idx]
+        idx += 1
+
+
+def upload(case_id: str, path: Path, timeout_s: int = 900, retries: int = 4) -> Dict:
+    """Upload one file and return the resulting evidence item.
+
+    The backend talks to a remote Postgres pooler, so a transient DNS or
+    connection failure surfaces as a 500 rather than a 4xx. That is an
+    infrastructure hiccup, not a bad file, so the upload is retried with a
+    backoff before it is reported as an error.
+    """
+    last_exc: Optional[Exception] = None
+    for attempt in range(retries + 1):
+        handles = []
+        try:
+            handle = open(path, "rb")
+            handles.append(handle)
+            files = {"files": (path.name, handle, "application/octet-stream")}
+            data = {
+                "case_id": case_id,
+                "category": "General Investigation",
+                "uploader": OFFICER,
+            }
+            r = session.post(
+                f"{BASE}/api/evidence/uploads",
+                files=files,
+                data=data,
+                timeout=timeout_s,
+            )
+            if r.status_code >= 500 and attempt < retries:
+                print(
+                    f"    [retry {attempt + 1}/{retries}] {path.name}: server error {r.status_code}",
+                    flush=True,
+                )
+                time.sleep(RETRY_BACKOFF_S * (attempt + 1))
+                continue
+            r.raise_for_status()
+            items = r.json().get("items", [])
+            return items[0] if items else {}
+        except requests.RequestException as exc:
+            last_exc = exc
+            if attempt >= retries:
+                raise
+            print(
+                f"    [retry {attempt + 1}/{retries}] {path.name}: {exc}",
+                flush=True,
+            )
+            time.sleep(RETRY_BACKOFF_S * (attempt + 1))
+        finally:
+            for h in handles:
+                h.close()
+    if last_exc is not None:
+        raise last_exc
+    return {}
+
+
+def summarize(item: Dict) -> str:
+    job = item.get("job", {}) or {}
+    warns = job.get("warnings") or []
+    bits = [
+        f"mentions={job.get('mention_count', 0)}",
+        f"claims={job.get('claim_count', 0)}",
+        f"status={job.get('status')}",
+    ]
+    if warns:
+        bits.append(f"warnings={len(warns)}")
+    return " ".join(bits)
+
+
+def is_rate_limited(item: Dict) -> bool:
+    """True when the provider refused the extraction call.
+
+    The backend records the provider's own message in the evidence job
+    warnings, so the refusal is detected from the recorded reason rather than
+    from the HTTP status of the upload.
+    """
+    job = item.get("job", {}) or {}
+    for w in job.get("warnings") or []:
+        low = str(w).lower()
+        if "extraction failed" in low and any(m in low for m in RATE_LIMIT_MARKERS):
+            return True
+    return False
+
+
+def retry_hint_seconds(item: Dict) -> Optional[float]:
+    """Return the provider's own 'try again in X' hint, in seconds."""
+    job = item.get("job", {}) or {}
+    for w in job.get("warnings") or []:
+        m = re.search(r"retry after\s+([0-9]+(?:\.[0-9]+)?)\s*s", str(w), re.IGNORECASE)
+        if m:
+            return float(m.group(1))
+    return None
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Bulk ingest SFIC_DATASET into ATLAS.")
+    ap.add_argument("--kind", choices=["pdf", "xlsx", "all"], default="all")
+    ap.add_argument("--cases", nargs="*", default=None, help="Limit to these case ids.")
+    ap.add_argument("--max-files", type=int, default=0, help="Stop after N files (0 = no limit).")
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--reset", action="store_true", help="Ignore the resume state.")
+    args = ap.parse_args()
+
+    if not DATASET.is_dir():
+        print(f"[fatal] dataset not found: {DATASET}", file=sys.stderr)
+        return 2
+
+    case_dirs = sorted(p for p in DATASET.iterdir() if p.is_dir())
+    if args.cases:
+        wanted = {c.upper() for c in args.cases}
+        case_dirs = [p for p in case_dirs if p.name.upper() in wanted]
+    if not case_dirs:
+        print("[fatal] no matching case directories", file=sys.stderr)
+        return 2
+
+    exts = {".pdf"} if args.kind == "pdf" else {".xlsx", ".xls"} if args.kind == "xlsx" else {".pdf", ".xlsx", ".xls"}
+
+    groups: List[List[Tuple[str, Path]]] = []
+    for cd in case_dirs:
+        files = sorted(p for p in cd.iterdir() if p.is_file() and p.suffix.lower() in exts)
+        if files:
+            groups.append([(cd.name, f) for f in files])
+
+    total = sum(len(g) for g in groups)
+    print(f"[plan] {total} files across {len(groups)} cases", flush=True)
+
+    if args.dry_run:
+        for g in groups:
+            print(f"  {g[0][0]}: {len(g)} files")
+        return 0
+
+    login()
+
+    done: Dict[str, set[str]] = {}
+    stale: Dict[str, Dict[str, str]] = {}
+    if not args.reset:
+        for g in groups:
+            cid = g[0][0]
+            try:
+                usable, bad = existing_evidence(cid)
+            except Exception as exc:
+                print(f"[warn] could not read existing evidence for {cid}: {exc}", flush=True)
+                usable, bad = set(), {}
+            done[cid] = usable
+            stale[cid] = bad
+        skipped = sum(1 for g in groups for c, f in g if f.name in done.get(c, set()))
+        n_stale = sum(len(v) for v in stale.values())
+        if skipped:
+            print(f"[resume] {skipped} file(s) already extracted, skipping them", flush=True)
+        if n_stale:
+            print(f"[resume] {n_stale} file(s) recorded with no mentions, will reprocess", flush=True)
+
+    processed = 0
+    failures = 0
+    limited = False
+    started = time.time()
+    attempts: Dict[Tuple[str, str], int] = {}
+
+    queue = deque(round_robin(groups))
+    while queue:
+        case_id, path = queue.popleft()
+        if args.max_files and processed >= args.max_files:
+            print(f"[stop] reached --max-files={args.max_files}", flush=True)
+            break
+        if path.name in done.get(case_id, set()):
+            continue
+
+        key = (case_id, path.name)
+        attempts[key] = attempts.get(key, 0) + 1
+
+        stale_id = stale.get(case_id, {}).get(path.name)
+        if stale_id and delete_evidence(stale_id):
+            print(f"[retry] removed the empty record for {case_id}/{path.name}", flush=True)
+
+        t0 = time.time()
+        try:
+            item = upload(case_id, path)
+        except Exception as exc:
+            failures += 1
+            print(f"[error] {case_id}/{path.name}: {exc}", flush=True)
+            time.sleep(2)
+            continue
+
+        processed += 1
+        done.setdefault(case_id, set()).add(path.name)
+        job = item.get("job", {}) or {}
+        mentions = job.get("mention_count") or 0
+        if mentions:
+            print(
+                f"[ok] {case_id}/{path.name}  {summarize(item)}  {time.time()-t0:.1f}s",
+                flush=True,
+            )
+        else:
+            print(
+                f"[fail] {case_id}/{path.name}  no mentions extracted  "
+                f"{time.time()-t0:.1f}s",
+                flush=True,
+            )
+
+        if not is_rate_limited(item):
+            if not mentions:
+                failures += 1
+            continue
+
+        failures += 1
+        hint = retry_hint_seconds(item)
+        evidence_id = item.get("evidence_id")
+        if (
+            hint is not None
+            and hint <= MAX_QUOTA_WAIT_S
+            and attempts[key] < MAX_QUOTA_RETRIES
+        ):
+            # The provider told us when its budget frees up. Wait exactly that
+            # long and run the same file again rather than stopping the whole
+            # ingest after one refusal.
+            if evidence_id:
+                delete_evidence(evidence_id)
+            print(
+                f"[wait] provider budget exhausted; waiting {hint:.0f}s "
+                f"before retrying {case_id}/{path.name} "
+                f"(attempt {attempts[key]}/{MAX_QUOTA_RETRIES})",
+                flush=True,
+            )
+            done[case_id].discard(path.name)
+            queue.appendleft((case_id, path))
+            time.sleep(hint + 5)
+            continue
+
+        print(
+            "[stop] the provider refused the request (rate/quota limit) and no "
+            "usable retry hint was given. Stopping instead of hammering it.",
+            flush=True,
+        )
+        limited = True
+        break
+
+    elapsed = time.time() - started
+    print(
+        f"[done] processed={processed} errors={failures} elapsed={elapsed/60:.1f}min "
+        f"rate_limited={limited}",
+        flush=True,
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
