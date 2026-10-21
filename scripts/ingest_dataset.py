@@ -58,6 +58,24 @@ MAX_QUOTA_RETRIES = 200
 MAX_QUOTA_WAIT_S = 3600.0
 MAX_QUOTA_WAIT_TOTAL_S = 20 * 3600.0
 
+# The daily budget is a token bucket: it refills with a day's worth of tokens
+# over 24 hours, so the provider's own "try again in Xs" hint only tells us when
+# the bucket holds enough room for the chunk that was refused. A document is
+# extracted in several chunks, and every chunk is charged against the same
+# bucket, so a document that starts when only one chunk's worth of room is free
+# is refused at its second chunk - after the first chunk has already been paid
+# for. The wait is therefore extended by the time it takes the bucket to refill
+# with the document's own cost.
+BUDGET_REFILL_TOKENS_PER_S = 200000.0 / 86400.0
+
+# The cost estimate is deliberately generous. It decides how long to wait for
+# the bucket to refill, and over-estimating only lengthens the wait, while
+# under-estimating lets the provider refuse the later chunks of a document whose
+# earlier chunks were already paid for.
+TOKEN_COST_FACTOR = 2.5
+PER_CHUNK_OVERHEAD_TOKENS = 400
+TOKEN_COST_FLOOR = 2000
+
 # Substrings that identify a provider refusal in a job warning.
 RATE_LIMIT_MARKERS = (
     "rate limit",
@@ -229,6 +247,38 @@ def retry_hint_seconds(item: Dict) -> Optional[float]:
     return None
 
 
+def estimate_document_tokens(path: Path, chunk_chars: int) -> int:
+    """Estimate how many tokens the provider will charge for this document.
+
+    A document is extracted in chunks, and each chunk is a separate request
+    that is charged against the same daily budget. The estimate is used to work
+    out how long the budget has to refill before the document can be extracted
+    in one go, so it is deliberately generous: over-estimating only lengthens
+    the wait, while under-estimating means the provider refuses the later
+    chunks of a document whose earlier chunks were already paid for.
+
+    Spreadsheets are parsed by the deterministic tabular path and never reach
+    the model, so they cost nothing.
+    """
+    if path.suffix.lower() != ".pdf":
+        return 0
+    try:
+        import pymupdf as fitz
+
+        with fitz.open(path) as doc:
+            pages = [page.get_text("text") or "" for page in doc]
+    except Exception:
+        return 0
+
+    chars = sum(len(text) for text in pages)
+    # The extractor groups pages into chunks of at most `chunk_chars`
+    # characters, so a page counts as at least one chunk and a long page as
+    # several.
+    chunks = sum(max(1, -(-len(text) // chunk_chars)) for text in pages if text)
+    est_input = chars / 4.0 + PER_CHUNK_OVERHEAD_TOKENS * chunks
+    return int(TOKEN_COST_FACTOR * est_input + TOKEN_COST_FLOOR)
+
+
 def main() -> int:
     global BASE
 
@@ -255,9 +305,19 @@ def main() -> int:
         default=1,
         help="How many shards the dataset is split into (default %(default)s).",
     )
+    ap.add_argument(
+        "--chunk-chars",
+        type=int,
+        default=12000,
+        help=(
+            "The server's LLM_CHUNK_CHARS, used to estimate how many tokens a "
+            "document costs. Default %(default)s."
+        ),
+    )
     args = ap.parse_args()
 
     BASE = args.base.rstrip("/")
+    chunk_chars = args.chunk_chars
 
     if args.num_shards < 1 or not (0 <= args.shard < args.num_shards):
         print("[fatal] --shard must be in [0, --num-shards)", file=sys.stderr)
@@ -381,6 +441,13 @@ def main() -> int:
         hint = retry_hint_seconds(item)
         evidence_id = item.get("evidence_id")
         total_wait = waited.get(key, 0.0)
+        # The provider's hint covers the chunk that was refused. The document
+        # needs room for every one of its chunks, so the wait is extended by the
+        # time it takes the budget to refill with the document's own cost -
+        # otherwise the next attempt pays for the first chunk again and is
+        # refused at the second one, for ever.
+        doc_tokens = estimate_document_tokens(path, chunk_chars)
+        extra_wait = doc_tokens / BUDGET_REFILL_TOKENS_PER_S
         if (
             hint is not None
             and hint <= MAX_QUOTA_WAIT_S
@@ -392,17 +459,19 @@ def main() -> int:
             # ingest after one refusal.
             if evidence_id:
                 delete_evidence(evidence_id)
-            waited[key] = total_wait + hint
+            wait = hint + extra_wait
+            waited[key] = total_wait + wait
             print(
-                f"[wait] provider budget exhausted; waiting {hint:.0f}s "
-                f"before retrying {case_id}/{path.name} "
+                f"[wait] provider budget exhausted; waiting {wait:.0f}s "
+                f"(provider hint {hint:.0f}s + {extra_wait:.0f}s for the "
+                f"{doc_tokens} remaining tokens of {case_id}/{path.name}) "
                 f"(attempt {attempts[key]}/{MAX_QUOTA_RETRIES}, "
                 f"waited {waited[key]/60:.0f}min so far)",
                 flush=True,
             )
             done[case_id].discard(path.name)
             queue.appendleft((case_id, path))
-            time.sleep(hint + 5)
+            time.sleep(wait + 5)
             continue
 
         print(
