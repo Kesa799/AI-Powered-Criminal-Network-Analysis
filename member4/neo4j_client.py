@@ -1,8 +1,33 @@
 import logging
+import time
 from typing import Dict, Any, List, Optional
 from neo4j import GraphDatabase, Driver
+from neo4j.exceptions import (
+    ConnectionPoolError,
+    ServiceUnavailable,
+    SessionExpired,
+    TransientError,
+)
 
 logger = logging.getLogger("graph_system")
+
+# Aura (and every Neo4j Cloud load balancer) drops connections that have been
+# idle for a while. A pooled connection that the server closed underneath us
+# fails the next query with a "defunct connection" error even though the
+# driver, the credentials and the database are all fine. Recycling connections
+# before that happens keeps the mirror readable.
+MAX_CONNECTION_LIFETIME_S = 300.0
+
+# Errors that mean "the connection died, try again", not "the query is wrong".
+_TRANSIENT = (ServiceUnavailable, SessionExpired, ConnectionPoolError, TransientError)
+
+# How many times a query is re-run after a transient connection failure.
+MAX_ATTEMPTS = 3
+
+
+def _retry_delays() -> List[float]:
+    return [0.5, 2.0]
+
 
 class Neo4jClient:
     def __init__(self, uri: str, user: str, password: str, database: str = "neo4j"):
@@ -16,7 +41,12 @@ class Neo4jClient:
 
     def connect(self) -> bool:
         try:
-            self._driver = GraphDatabase.driver(self.uri, auth=(self.user, self.password))
+            self._driver = GraphDatabase.driver(
+                self.uri,
+                auth=(self.user, self.password),
+                max_connection_lifetime=MAX_CONNECTION_LIFETIME_S,
+                connection_acquisition_timeout=30,
+            )
             self._driver.verify_connectivity()
             self._connected = True
             logger.info(f"Successfully connected to Neo4j at {self.uri}")
@@ -64,18 +94,50 @@ class Neo4jClient:
                     logger.debug(f"Constraint notice ({q}): {ex}")
         self._constraints_ready = True
 
+    def _run_with_retry(self, action, description: str):
+        """Run a Neo4j action, retrying only connection-level failures.
+
+        A query that fails because the pooled connection was closed by the
+        server is retried on a fresh connection. A query that fails because of
+        its own content (syntax, constraint, timeout) is never retried.
+        """
+        delays = _retry_delays()
+        last_exc: Optional[Exception] = None
+        for attempt in range(MAX_ATTEMPTS):
+            try:
+                return action()
+            except _TRANSIENT as exc:
+                last_exc = exc
+                if attempt >= MAX_ATTEMPTS - 1:
+                    break
+                delay = delays[min(attempt, len(delays) - 1)]
+                logger.warning(
+                    f"Transient Neo4j failure during {description}: {exc}. "
+                    f"Retrying in {delay}s (attempt {attempt + 2}/{MAX_ATTEMPTS})."
+                )
+                time.sleep(delay)
+        raise last_exc  # type: ignore[misc]
+
     def execute_write(self, cypher: str, parameters: Optional[Dict[str, Any]] = None):
         if not self.is_connected:
             return None
-        with self._driver.session(database=self.database) as session:
-            return session.execute_write(lambda tx: list(tx.run(cypher, parameters or {})))
+
+        def _action():
+            with self._driver.session(database=self.database) as session:
+                return session.execute_write(lambda tx: list(tx.run(cypher, parameters or {})))
+
+        return self._run_with_retry(_action, "a write")
 
     def execute_read(self, cypher: str, parameters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         if not self.is_connected:
             return []
-        with self._driver.session(database=self.database) as session:
-            res = session.run(cypher, parameters or {})
-            return [record.data() for record in res]
+
+        def _action():
+            with self._driver.session(database=self.database) as session:
+                res = session.run(cypher, parameters or {})
+                return [record.data() for record in res]
+
+        return self._run_with_retry(_action, "a read")
 
     def get_full_graph(self, limit: int = 2500) -> Dict[str, Any]:
         """Fetch nodes and edges formatted for visualization."""
@@ -91,7 +153,9 @@ class Neo4jClient:
         nodes_dict = {}
         edges_list = []
 
-        try:
+        def _fetch():
+            local_nodes: Dict[str, Any] = {}
+            local_edges: List[Dict[str, Any]] = []
             with self._driver.session(database=self.database) as session:
                 result = session.run(cypher, {"limit": limit})
                 for record in result:
@@ -102,7 +166,7 @@ class Neo4jClient:
                     if n:
                         n_id = str(n.element_id if hasattr(n, "element_id") else n.id)
                         labels = list(n.labels)
-                        nodes_dict[n_id] = {
+                        local_nodes[n_id] = {
                             "id": n_id,
                             "labels": labels,
                             "primary_label": labels[0] if labels else "Node",
@@ -112,7 +176,7 @@ class Neo4jClient:
                     if m:
                         m_id = str(m.element_id if hasattr(m, "element_id") else m.id)
                         labels = list(m.labels)
-                        nodes_dict[m_id] = {
+                        local_nodes[m_id] = {
                             "id": m_id,
                             "labels": labels,
                             "primary_label": labels[0] if labels else "Node",
@@ -123,13 +187,17 @@ class Neo4jClient:
                         r_id = str(r.element_id if hasattr(r, "element_id") else r.id)
                         start_id = str(r.start_node.element_id if hasattr(r.start_node, "element_id") else r.start_node.id)
                         end_id = str(r.end_node.element_id if hasattr(r.end_node, "element_id") else r.end_node.id)
-                        edges_list.append({
+                        local_edges.append({
                             "id": r_id,
                             "from": start_id,
                             "to": end_id,
                             "label": r.type,
                             "properties": dict(r.items())
                         })
+            return local_nodes, local_edges
+
+        try:
+            nodes_dict, edges_list = self._run_with_retry(_fetch, "the full graph fetch")
         except Exception as e:
             logger.error(f"Error fetching full graph from Neo4j: {e}")
 

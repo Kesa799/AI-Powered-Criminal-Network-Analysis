@@ -10,18 +10,24 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # after a client reset (WinError 64). See atlas_loop.py for details.
 LOOP_FACTORY = "atlas_loop:atlas_loop_factory"
 
+# The port is configurable so a second instance can serve the same database
+# and graph with a different LLM model. The provider's daily token budget is
+# per model, so two instances make the dataset ingestible at twice the rate.
+PORT = int(os.getenv("ATLAS_PORT", "8000"))
+HOST = os.getenv("ATLAS_HOST", "0.0.0.0")
+
 if __name__ == "__main__":
     print("=" * 60)
     print("  ATLAS Criminal Network Intelligence & Forensic Analysis API")
     print("  Member 2: Backend, Database & Application Management")
     print("=" * 60)
-    print("  Serving API & Frontend at: http://127.0.0.1:8000")
-    print("  Interactive Swagger Docs at: http://127.0.0.1:8000/docs")
+    print(f"  Serving API & Frontend at: http://127.0.0.1:{PORT}")
+    print(f"  Interactive Swagger Docs at: http://127.0.0.1:{PORT}/docs")
     print("=" * 60)
     uvicorn.run(
         "backend.main:app",
-        host="0.0.0.0",
-        port=8000,
+        host=HOST,
+        port=PORT,
         reload=False,
         loop=LOOP_FACTORY,
     )

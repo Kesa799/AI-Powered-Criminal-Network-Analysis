@@ -291,15 +291,34 @@ Groq enforces three separate ceilings on a single account, and they fail differe
 | :--- | :--- | :--- |
 | Output tokens per completion | HTTP 400 `json_validate_failed` - the generated JSON is truncated mid-object | Fixed by `LLM_MAX_COMPLETION_TOKENS` (default 8192). The provider's default ceiling is lower than one extraction needs. |
 | Output tokens per minute | HTTP 429 on most requests, `x-ratelimit-reset-tokens` in seconds | Retried with backoff, and paced client-side by `LLM_MIN_INTERVAL_S` / `LLM_MAX_REQUESTS_PER_MINUTE`. |
-| **Tokens per day (TPD)** | HTTP 429 whose body names `tokens per day (TPD)` and a wait hint measured in minutes | **Fails fast** (`QuotaExceededError`). The budget is organisation-wide, so no other model on the account has a separate allowance to fall back to. |
+| **Output tokens per minute, per model (OTPM)** | HTTP 413 `Request too large for model ... on output tokens per minute (OTPM): Limit 1000, Requested N` | The provider refuses the request when the *reserved* output (`max_completion_tokens`) exceeds the model's per-minute output allowance. `qwen/qwen3.8-27b` is limited to 1000, so it needs `LLM_MAX_COMPLETION_TOKENS=1000` together with a smaller `LLM_CHUNK_CHARS`. |
+| **Tokens per day (TPD)** | HTTP 429 whose body names `tokens per day (TPD)` and a wait hint measured in minutes | **Fails fast** (`QuotaExceededError`). The budget is **per model**, so a second model on the same account does have its own allowance to fall back to (see below). |
 
-The daily budget on the free tier is **200,000 tokens per organisation**. One narrative PDF
-costs roughly 2,000 prompt + 2,000 completion tokens, so a hundred-document corpus does
-not fit in one day on that tier.
+The daily budget on the free tier is **200,000 tokens per model**. It is a **token bucket that
+refills at 200,000 tokens per 24 hours** (about 2.31 tokens/second), not a limit that resets
+at a wall-clock boundary: the provider's `Used` counter falls at exactly that rate while no
+extraction is running. One narrative PDF costs roughly 2,000 prompt + 2,000 completion
+tokens, so a hundred-document corpus does not fit in one day on that tier.
+
+Because the bucket is **per model rather than per organisation**, a single account can run
+several models at once and roughly double or triple its daily throughput:
+
+```powershell
+# One API instance per model. Each has its own daily bucket.
+$env:ATLAS_PORT=8000; $env:LLM_MODEL="openai/gpt-oss-120b";        python run.py
+$env:ATLAS_PORT=8001; $env:LLM_MODEL="qwen/qwen3.8-27b"
+$env:LLM_CHUNK_CHARS=3000; $env:LLM_MAX_COMPLETION_TOKENS=1000;    python run.py
+
+# One ingest worker per instance, each taking a disjoint shard of the dataset.
+python scripts/ingest_dataset.py --base http://127.0.0.1:8000 --shard 0 --num-shards 2
+python scripts/ingest_dataset.py --base http://127.0.0.1:8001 --shard 1 --num-shards 2
+```
 
 The `x-ratelimit-*` headers are **not** the signal for the daily condition: on a refused
 request they still show a full per-minute budget, because the daily check happens first.
 The body is the only reliable indicator, which is why the adapter reads it directly.
+The body's `Limit`/`Used`/`Requested` triple also shows *which* model's bucket was
+refused, which is how the per-model behaviour was confirmed.
 
 When the daily budget is exhausted the extraction fails, and the failure is recorded
 rather than hidden - the evidence row keeps zero model-derived mentions and carries the

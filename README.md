@@ -109,8 +109,10 @@ ATLAS_REQUIRE_TESSERACT=true
 > - Groq's default `max_completion_tokens` truncates the generated JSON mid-object and
 >   reports the truncation as HTTP 400 `json_validate_failed`. Setting
 >   `LLM_MAX_COMPLETION_TOKENS` fixes it.
-> - Groq enforces a 1000 output-token/minute ceiling on `qwen/qwen3.8-27b`, which that
->   model's ~2000-token extractions exceed, so the provider rejects the request outright.
+> - Groq enforces a 1000 output-token/minute ceiling on `qwen/qwen3.8-27b`. At the
+>   default chunk size that model's extractions exceed the ceiling and the provider
+>   rejects the request outright; with `LLM_MAX_COMPLETION_TOKENS=1000` and a smaller
+>   `LLM_CHUNK_CHARS` it becomes usable as a second worker.
 > - The tier allows 8000 tokens/minute and one extraction costs 2500-4700 tokens, so two
 >   calls inside the same window are refused. Calls are therefore spaced 60s apart
 >   (`LLM_MIN_INTERVAL_S=60`), which keeps at most one call's tokens in any window.
@@ -119,9 +121,12 @@ ATLAS_REQUIRE_TESSERACT=true
 > matrix and the measured rate-limit envelope.
 
 > **Daily budget.** On top of the per-minute limits above, the Groq free tier allows
-> **200,000 tokens per day per organisation** - shared by every model on the account.
-> The adapter fails fast on that refusal (DEC-039) and the bulk ingest paces itself to
-> the provider's own retry hint, so an exhausted budget costs time, never data.
+> **200,000 tokens per day per model** - each model on the account has its own allowance,
+> and the allowance refills at 200,000 tokens per 24 hours (about 2.31 tokens/second). The
+> adapter fails fast on that refusal (DEC-039) and the bulk ingest paces itself to the
+> provider's own retry hint, so an exhausted budget costs time, never data. Because the
+> budget is per model, running one API instance per model multiplies the daily throughput
+> of a single key (DEC-040).
 
 ---
 
@@ -254,6 +259,13 @@ python scripts/ingest_dataset.py --kind pdf --cases CASE_001 CASE_002
 
 # Plan the run without calling the API
 python scripts/ingest_dataset.py --dry-run
+
+# Read-only progress report: how much of the dataset is already extracted
+python scripts/ingest_status.py
+
+# One worker per model, each taking a disjoint shard of the dataset
+python scripts/ingest_dataset.py --base http://127.0.0.1:8000 --shard 0 --num-shards 2
+python scripts/ingest_dataset.py --base http://127.0.0.1:8001 --shard 1 --num-shards 2
 ```
 
 The script is designed for a **finite provider token budget**:
@@ -273,16 +285,41 @@ Extraction cost is real: one narrative PDF is roughly 1500-2500 prompt + 1000-22
 tokens, and the client paces itself to the provider's token-per-minute budget
 (`LLM_MIN_INTERVAL_S`). A large dataset therefore takes minutes per file, not seconds.
 
-> **Provider budget.** The Groq free tier allows **200,000 tokens per day per
-> organisation** - a budget shared by every model on the account, not per model. The
-> whole `SFIC_DATASET` (82 narrative PDFs) needs roughly 300,000-400,000 tokens, so it
-> cannot be extracted in a single day on that tier. When the budget is spent the
-> provider refuses with
+> **Provider budget.** The Groq free tier allows **200,000 tokens per day per model** - the
+> budget is *per model*, so each model on the account has its own allowance and several
+> models can run side by side. It is a token bucket that refills at 200,000 tokens per 24
+> hours (about 2.31 tokens/second) rather than a limit that resets at midnight. The whole
+> `SFIC_DATASET` (82 narrative PDFs) needs roughly 300,000-400,000 tokens, so it cannot be
+> extracted in a single day on that tier. When the budget is spent the provider refuses
+> with
 > `Rate limit reached ... on tokens per day (TPD): Limit 200000, Used 198961 ...`,
 > the adapter fails fast on it instead of retrying, the backend records the refusal in
 > `job_warnings`, and the ingest script waits for the provider's stated hint. Re-running
 > `python scripts/ingest_dataset.py` later resumes where it stopped - no work is lost.
 > A paid Groq tier removes the limit.
+
+**Running several workers at once.** Because the daily budget is per model, one ATLAS
+instance per model multiplies the daily throughput of a single API key. Give each
+instance its own port and its own model, then point one ingest worker at each:
+
+```powershell
+# Instance 1 - the verified primary model, large chunks
+$env:ATLAS_PORT=8000; $env:LLM_MODEL="openai/gpt-oss-120b"; python run.py
+
+# Instance 2 - a second model, smaller chunks and its output ceiling
+$env:ATLAS_PORT=8001; $env:LLM_MODEL="qwen/qwen3.8-27b"
+$env:LLM_CHUNK_CHARS=3000; $env:LLM_MAX_COMPLETION_TOKENS=1000; python run.py
+
+# Two workers, disjoint shards of the same dataset
+python scripts/ingest_dataset.py --base http://127.0.0.1:8000 --shard 0 --num-shards 2
+python scripts/ingest_dataset.py --base http://127.0.0.1:8001 --shard 1 --num-shards 2
+```
+
+`qwen/qwen3.8-27b` is capped by the provider at 1000 output tokens per minute, so it needs
+`LLM_MAX_COMPLETION_TOKENS=1000` and a smaller `LLM_CHUNK_CHARS`; `openai/gpt-oss-120b` has
+no such cap and is the model verified over the whole corpus. The per-model limits and the
+measurements behind them are recorded in `docs/docs/MODEL_GUIDE.md` and in
+`member3/SFIC_Doc_Module/docs/DECISIONS.md` (DEC-040).
 
 A failed extraction is never papered over. When the model cannot read a document, the
 evidence row keeps **zero** model-derived mentions and carries the provider's reason in

@@ -48,8 +48,15 @@ RETRY_BACKOFF_S = 20.0
 # When the provider refuses because its daily token budget is spent it states
 # when to try again. Honouring that hint paces the ingest to the provider's
 # own budget instead of hammering it.
-MAX_QUOTA_RETRIES = 3
+#
+# The daily budget is a token bucket that refills slowly (one day's worth of
+# tokens over 24 hours), so a refused file can wait for *hours* before the
+# provider's hint comes due. The cap is therefore on the total time a single
+# file may spend waiting, not on the number of attempts: a three-attempt cap
+# would abandon a file after roughly one provider hint and stop the run.
+MAX_QUOTA_RETRIES = 200
 MAX_QUOTA_WAIT_S = 3600.0
+MAX_QUOTA_WAIT_TOTAL_S = 20 * 3600.0
 
 # Substrings that identify a provider refusal in a job warning.
 RATE_LIMIT_MARKERS = (
@@ -223,13 +230,38 @@ def retry_hint_seconds(item: Dict) -> Optional[float]:
 
 
 def main() -> int:
+    global BASE
+
     ap = argparse.ArgumentParser(description="Bulk ingest SFIC_DATASET into ATLAS.")
     ap.add_argument("--kind", choices=["pdf", "xlsx", "all"], default="all")
     ap.add_argument("--cases", nargs="*", default=None, help="Limit to these case ids.")
     ap.add_argument("--max-files", type=int, default=0, help="Stop after N files (0 = no limit).")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--reset", action="store_true", help="Ignore the resume state.")
+    ap.add_argument(
+        "--base",
+        default=BASE,
+        help="Base URL of the ATLAS API (default %(default)s).",
+    )
+    ap.add_argument(
+        "--shard",
+        type=int,
+        default=0,
+        help="Index of this worker's shard of the dataset (0-based).",
+    )
+    ap.add_argument(
+        "--num-shards",
+        type=int,
+        default=1,
+        help="How many shards the dataset is split into (default %(default)s).",
+    )
     args = ap.parse_args()
+
+    BASE = args.base.rstrip("/")
+
+    if args.num_shards < 1 or not (0 <= args.shard < args.num_shards):
+        print("[fatal] --shard must be in [0, --num-shards)", file=sys.stderr)
+        return 2
 
     if not DATASET.is_dir():
         print(f"[fatal] dataset not found: {DATASET}", file=sys.stderr)
@@ -285,8 +317,21 @@ def main() -> int:
     limited = False
     started = time.time()
     attempts: Dict[Tuple[str, str], int] = {}
+    waited: Dict[Tuple[str, str], float] = {}
 
-    queue = deque(round_robin(groups))
+    # The round-robin order is deterministic, so sharding on the position in
+    # that order is stable across runs: a worker always picks up the same
+    # files it picked up before, which is what makes the resume work.
+    ordered = list(round_robin(groups))
+    if args.num_shards > 1:
+        print(
+            f"[shard] worker {args.shard}/{args.num_shards} owns "
+            f"{len(ordered) // args.num_shards + (1 if args.shard < len(ordered) % args.num_shards else 0)} "
+            f"of {len(ordered)} files",
+            flush=True,
+        )
+        ordered = [item for i, item in enumerate(ordered) if i % args.num_shards == args.shard]
+    queue = deque(ordered)
     while queue:
         case_id, path = queue.popleft()
         if args.max_files and processed >= args.max_files:
@@ -335,20 +380,24 @@ def main() -> int:
         failures += 1
         hint = retry_hint_seconds(item)
         evidence_id = item.get("evidence_id")
+        total_wait = waited.get(key, 0.0)
         if (
             hint is not None
             and hint <= MAX_QUOTA_WAIT_S
             and attempts[key] < MAX_QUOTA_RETRIES
+            and total_wait < MAX_QUOTA_WAIT_TOTAL_S
         ):
             # The provider told us when its budget frees up. Wait exactly that
             # long and run the same file again rather than stopping the whole
             # ingest after one refusal.
             if evidence_id:
                 delete_evidence(evidence_id)
+            waited[key] = total_wait + hint
             print(
                 f"[wait] provider budget exhausted; waiting {hint:.0f}s "
                 f"before retrying {case_id}/{path.name} "
-                f"(attempt {attempts[key]}/{MAX_QUOTA_RETRIES})",
+                f"(attempt {attempts[key]}/{MAX_QUOTA_RETRIES}, "
+                f"waited {waited[key]/60:.0f}min so far)",
                 flush=True,
             )
             done[case_id].discard(path.name)
