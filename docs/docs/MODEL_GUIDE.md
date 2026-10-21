@@ -283,6 +283,32 @@ TESSERACT_CMD=C:\Program Files\Tesseract-OCR\tesseract.exe
 PYTHONUTF8=1
 ```
 
+### Provider Limits (Groq)
+
+Groq enforces three separate ceilings on a single account, and they fail differently:
+
+| Ceiling | Symptom | ATLAS behaviour |
+| :--- | :--- | :--- |
+| Output tokens per completion | HTTP 400 `json_validate_failed` - the generated JSON is truncated mid-object | Fixed by `LLM_MAX_COMPLETION_TOKENS` (default 8192). The provider's default ceiling is lower than one extraction needs. |
+| Output tokens per minute | HTTP 429 on most requests, `x-ratelimit-reset-tokens` in seconds | Retried with backoff, and paced client-side by `LLM_MIN_INTERVAL_S` / `LLM_MAX_REQUESTS_PER_MINUTE`. |
+| **Tokens per day (TPD)** | HTTP 429 whose body names `tokens per day (TPD)` and a wait hint measured in minutes | **Fails fast** (`QuotaExceededError`). The budget is organisation-wide, so no other model on the account has a separate allowance to fall back to. |
+
+The daily budget on the free tier is **200,000 tokens per organisation**. One narrative PDF
+costs roughly 2,000 prompt + 2,000 completion tokens, so a hundred-document corpus does
+not fit in one day on that tier.
+
+The `x-ratelimit-*` headers are **not** the signal for the daily condition: on a refused
+request they still show a full per-minute budget, because the daily check happens first.
+The body is the only reliable indicator, which is why the adapter reads it directly.
+
+When the daily budget is exhausted the extraction fails, and the failure is recorded
+rather than hidden - the evidence row keeps zero model-derived mentions and carries the
+provider's own message in its job warnings (see DEC-025 in
+[`DECISIONS.md`](./DECISIONS.md) and DEC-039 in
+`member3/SFIC_Doc_Module/docs/DECISIONS.md`). The bulk ingest script reads that message
+and paces itself to the provider's stated retry hint, so an exhausted budget costs time
+and never data.
+
 ### Common CLI Operations
 
 ```powershell

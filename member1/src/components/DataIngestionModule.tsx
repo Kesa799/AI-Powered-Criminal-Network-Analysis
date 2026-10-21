@@ -193,7 +193,7 @@ function renderProcessingStatus(job?: EvidenceItem['job'], isReviewed?: boolean)
     );
   }
 
-  if (status === 'Completed') {
+  if (status === 'Complete' || status === 'Completed') {
     return (
       <div className="status-indicator-container">
         <span className="status-badge completed">✓ Completed</span>

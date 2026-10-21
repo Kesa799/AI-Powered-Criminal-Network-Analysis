@@ -190,10 +190,11 @@ class EvidencePipeline:
         mentions_to_save: List[EvidenceMentionModel] = []
         rag_chunks: List[Dict[str, Any]] = []
         pipeline_warnings: List[str] = []
+        extraction: Dict[str, Any] = {"failed": False, "reasons": [], "source": "none"}
         graph_eng = get_graph_engine()
 
         if ext == "pdf":
-            doc_type, s_list, m_list, r_chunks = EvidencePipeline._process_pdf(
+            doc_type, s_list, m_list, r_chunks, extraction = EvidencePipeline._process_pdf(
                 file_path, filename, case_id, evidence_id, warnings=pipeline_warnings
             )
             sources_to_save.extend(s_list)
@@ -332,9 +333,17 @@ class EvidencePipeline:
                     case_obj.primary_suspect = top_p[0]
             db.commit()
 
-        # Update Evidence Item status to Complete
-        ev_item.status = "Complete"
-        ev_item.job_stage = "Intelligence Extracted & Graph Linked"
+        # Update Evidence Item status. A document the model could not read is
+        # recorded as Failed, never as Complete: the file was ingested and its
+        # text was captured, but the intelligence extraction did not happen.
+        if extraction.get("failed"):
+            ev_item.status = "Failed"
+            ev_item.job_stage = "Extraction Failed - The Model Did Not Read This Document"
+            ev_item.job_error = "; ".join(extraction.get("reasons") or ["LLM extraction failed"])
+        else:
+            ev_item.status = "Complete"
+            ev_item.job_stage = "Intelligence Extracted & Graph Linked"
+            ev_item.job_error = None
         ev_item.job_progress = 1.0
         ev_item.job_classification = doc_type
         ev_item.mention_count = len(mentions_to_save)
@@ -345,7 +354,13 @@ class EvidencePipeline:
         db.commit()
         db.refresh(ev_item)
 
-        logger.info(f"Pipeline complete for {filename}: {len(mentions_to_save)} mentions, {len(sources_to_save)} sources.")
+        if extraction.get("failed"):
+            logger.warning(
+                f"Pipeline recorded a failed extraction for {filename}: "
+                f"{ev_item.job_error}"
+            )
+        else:
+            logger.info(f"Pipeline complete for {filename}: {len(mentions_to_save)} mentions, {len(sources_to_save)} sources.")
         return ev_item
 
     @staticmethod
@@ -429,6 +444,7 @@ class EvidencePipeline:
         # Extract mentions using Member 3 Groq PipelineRunner first (narrative document intelligence)
         m3_extracted_mentions = []
         llm_extraction_failed = False
+        failure_reasons: List[str] = []
         try:
             from pathlib import Path
             import sys
@@ -460,6 +476,7 @@ class EvidencePipeline:
             llm_failures = EvidencePipeline._collect_llm_failures(case_res)
             if llm_failures:
                 llm_extraction_failed = True
+                failure_reasons.extend(llm_failures)
                 for failure in llm_failures:
                     logger.warning(f"Member 3 LLM extraction failed for {filename}: {failure}")
                 if warnings is not None:
@@ -519,8 +536,10 @@ class EvidencePipeline:
         except Exception as e:
             llm_extraction_failed = True
             logger.warning(f"Member 3 LLM extraction failed for {filename}: {e}")
+            reason = f"LLM extraction failed: {e}"
+            failure_reasons.append(reason)
             if warnings is not None:
-                warnings.append(f"LLM extraction failed: {e}")
+                warnings.append(reason)
 
         if m3_extracted_mentions:
             mentions.extend(m3_extracted_mentions)
@@ -590,7 +609,12 @@ class EvidencePipeline:
                         logger.warning(f"Error reading truth file {tc}: {e}")
 
         doc_type = classify_document(filename, " ".join(all_text[:3]))
-        return doc_type, sources, mentions, rag_chunks
+        extraction = {
+            "failed": llm_extraction_failed,
+            "reasons": failure_reasons,
+            "source": "llm" if m3_extracted_mentions else ("none" if llm_extraction_failed else "regex"),
+        }
+        return doc_type, sources, mentions, rag_chunks, extraction
 
     @staticmethod
     def _process_spreadsheet(file_path: Path, filename: str, case_id: str, evidence_id: str):
