@@ -47,7 +47,7 @@ app.include_router(integrity_router)
 app.include_router(boards_router)
 
 # Health Status Endpoint
-@app.get("/api/health", summary="System Health & Database Latency Probe")
+@app.api_route("/api/health", methods=["GET", "HEAD"], summary="System Health & Database Latency Probe")
 async def health_check():
     start_t = time.time()
     db_status = "Supabase PostgreSQL Connected"
@@ -96,7 +96,7 @@ if frontend_dist.exists() and (frontend_dist / "index.html").exists():
     if assets_dir.exists():
         app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
 
-    @app.get("/{full_path:path}")
+    @app.api_route("/{full_path:path}", methods=["GET", "HEAD"])
     async def serve_frontend(full_path: str):
         # Allow /api routes to pass through (handled by routers above)
         if full_path.startswith("api"):
