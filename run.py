@@ -5,12 +5,17 @@ import sys
 # Ensure current project directory is in sys.path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# Use the Selector event loop on every platform. uvicorn otherwise picks
-# ProactorEventLoop on Windows, which silently stops accepting connections
-# after a client reset (WinError 64). See atlas_loop.py for details.
-import atlas_loop
-atlas_loop.atlas_loop_factory()
-LOOP_FACTORY = "atlas_loop:atlas_loop_factory"
+# Use Selector event loop on Windows to prevent WinError 64 IOCP connection resets.
+# On Linux (Render), standard auto/uvloop is used.
+extra_run_kwargs = {}
+if sys.platform == "win32":
+    try:
+        import atlas_loop
+        atlas_loop.atlas_loop_factory()
+        if hasattr(uvicorn.config, "LOOP_SETUPS") and "atlas_loop:atlas_loop_factory" in uvicorn.config.LOOP_SETUPS:
+            extra_run_kwargs["loop"] = "atlas_loop:atlas_loop_factory"
+    except Exception:
+        pass
 
 # The port is configurable via PORT (Render, Heroku) or ATLAS_PORT.
 PORT = int(os.getenv("PORT", os.getenv("ATLAS_PORT", "8000")))
@@ -29,5 +34,5 @@ if __name__ == "__main__":
         host=HOST,
         port=PORT,
         reload=False,
-        loop=LOOP_FACTORY,
+        **extra_run_kwargs,
     )
