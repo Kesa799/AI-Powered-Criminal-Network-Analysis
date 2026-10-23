@@ -75,18 +75,29 @@ async def on_startup():
     except Exception as e:
         logger.error(f"Startup initialization warning: {e}")
 
-    # Restore the knowledge network from the persistent Neo4j mirror. The
-    # in-memory engine is the render source and starts empty on every process
-    # start; loading it back from Neo4j is what makes the graph survive a
-    # restart instead of having to be re-derived case by case.
+    # Restore the knowledge network from the persistent Neo4j mirror and database mentions.
     try:
         from backend.graph_manager import get_graph_engine
-        restored = get_graph_engine().load_from_neo4j()
+        engine = get_graph_engine()
+        restored = engine.load_from_neo4j()
         logger.info(
             f"Knowledge graph restored from Neo4j: {restored['nodes']} nodes, {restored['edges']} relationships."
         )
+
+        # Sync case mentions from database to guarantee all cases are complete
+        from backend.pipeline import EvidencePipeline
+        from backend.models import CaseModel, EvidenceMentionModel
+        from backend.database import SessionLocal
+        with SessionLocal() as db:
+            cases = db.query(CaseModel).all()
+            for c in cases:
+                m_list = db.query(EvidenceMentionModel).filter(EvidenceMentionModel.case_id == c.case_id).all()
+                if m_list:
+                    EvidencePipeline._sync_to_graph(c.case_id, "db_sync", m_list, engine)
+                EvidencePipeline._complete_case_graph(c.case_id, engine)
+            logger.info(f"Knowledge graph fully verified across {len(cases)} cases ({len(engine.nodes)} nodes, {len(engine.edges)} edges).")
     except Exception as e:
-        logger.warning(f"Could not restore the knowledge graph from Neo4j: {e}")
+        logger.warning(f"Could not restore or sync knowledge graph: {e}")
 
 # Frontend Static Assets Serving
 frontend_dist = settings.frontend_dist_dir

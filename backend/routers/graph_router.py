@@ -52,14 +52,14 @@ async def get_graph(
                 case_id = cid
 
     if cid:
-        has_case = any(
-            cid in n.get("properties", {}).get("case_ids", []) or n.get("properties", {}).get("case_id") == cid
-            for n in engine.nodes.values()
-        )
-        if not has_case:
-            with SessionLocal() as db_session:
-                m_list = db_session.query(EvidenceMentionModel).filter(EvidenceMentionModel.case_id == cid).all()
-                if m_list:
+        with SessionLocal() as db_session:
+            m_list = db_session.query(EvidenceMentionModel).filter(EvidenceMentionModel.case_id == cid).all()
+            if m_list:
+                case_node_count = sum(
+                    1 for n in engine.nodes.values()
+                    if cid in n.get("properties", {}).get("case_ids", []) or n.get("properties", {}).get("case_id") == cid
+                )
+                if case_node_count < len(m_list):
                     EvidencePipeline._sync_to_graph(cid, "db_sync", m_list, engine)
         EvidencePipeline._complete_case_graph(cid, engine)
 
