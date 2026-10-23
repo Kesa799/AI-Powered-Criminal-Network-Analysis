@@ -436,7 +436,7 @@ export function CaseWorkspace(props: Props) {
             <span>{String(record?.lead_investigator || record?.assigned_officer || 'Officer not recorded')}</span>
             {' '}
             <span className="tag plain" style={{ textTransform: 'uppercase', letterSpacing: '0.4px', fontWeight: 600 }}>
-              {String(record?.status || 'Under Investigation').replace(/_/g, ' ')}
+              {String(record?.status || 'UNDER_INVESTIGATION').replace(/_/g, ' ')}
             </span>
           </p>
         </div>
@@ -540,7 +540,7 @@ export function CaseWorkspace(props: Props) {
                         <span className="case-field-label">Investigation Status</span>
                         <span className="case-field-value">
                           <span className="tag plain" style={{ display: 'inline-block', padding: '2px 8px', fontSize: '11px', fontWeight: 600 }}>
-                            {String(record.status || 'Under Investigation').replace(/_/g, ' ')}
+                            {String(record.status || 'UNDER_INVESTIGATION').replace(/_/g, ' ')}
                           </span>
                         </span>
                       </div>
@@ -578,7 +578,7 @@ export function CaseWorkspace(props: Props) {
                       <div className="case-field-row">
                         <span className="case-field-label">Properties Stolen / Involved Value</span>
                         <span className="case-field-value font-semibold" style={{ color: '#0F766E' }}>
-                          {String(record.total_value || 'INR 72,000')}
+                          {String(record.total_value || 'Pending assessment')}
                         </span>
                       </div>
                     </div>
@@ -597,19 +597,19 @@ export function CaseWorkspace(props: Props) {
                       <div className="case-field-row">
                         <span className="case-field-label">Complainant / Informant</span>
                         <span className="case-field-value font-semibold">
-                          {String(record.complainant || (record as any).victim || 'Rita Sen (Workshop Manager)')}
+                          {String(record.complainant || (record as any).victim || 'Complainant on Record')}
                         </span>
                       </div>
                       <div className="case-field-row">
                         <span className="case-field-label">Assigned Investigating Officer</span>
                         <span className="case-field-value font-semibold">
-                          {String(record.lead_investigator || record.assigned_officer || 'Inspector Anaya Sen')}
+                          {String(record.lead_investigator || record.assigned_officer || 'Inspector Vikram Rathore')}
                         </span>
                       </div>
                       <div className="case-field-row">
                         <span className="case-field-label">Police Station / Beat Jurisdiction</span>
                         <span className="case-field-value">
-                          {String(record.police_station || record.jurisdiction || 'Nandipur East Police Station')}
+                          {String(record.police_station || record.jurisdiction || 'Jurisdiction Police Station')}
                         </span>
                       </div>
                       <div className="case-field-row">

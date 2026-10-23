@@ -8,6 +8,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # Use the Selector event loop on every platform. uvicorn otherwise picks
 # ProactorEventLoop on Windows, which silently stops accepting connections
 # after a client reset (WinError 64). See atlas_loop.py for details.
+import atlas_loop
+atlas_loop.atlas_loop_factory()
 LOOP_FACTORY = "atlas_loop:atlas_loop_factory"
 
 # The port is configurable so a second instance can serve the same database

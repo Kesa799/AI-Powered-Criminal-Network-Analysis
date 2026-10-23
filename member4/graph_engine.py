@@ -64,6 +64,8 @@ class KnowledgeGraphEngine:
         self.aggregated_edges.clear()
 
     def add_node(self, node_id: str, labels: List[str], properties: Dict[str, Any], caption: Optional[str] = None, level: int = 2):
+        if not node_id or str(node_id).endswith(":"):
+            return
         clean_props = clean_prop_dict(properties)
         clean_props["id"] = node_id
         if node_id not in self.nodes:
@@ -554,6 +556,8 @@ class KnowledgeGraphEngine:
 
         for row in node_rows:
             node_id = str(row.get("id"))
+            if not node_id or node_id.endswith(":"):
+                continue
             raw_labels = [str(l) for l in (row.get("labels") or [])]
             ordered = [l for l in raw_labels if l != "Entity"]
             if "Entity" in raw_labels:
@@ -625,6 +629,8 @@ class KnowledgeGraphEngine:
         candidate_nodes = {}
         excluded_labels = {"Source", "Case", "Mention", "Timeline", "Event", "Milestone"}
         for n_id, node in self.nodes.items():
+            if not n_id or str(n_id).endswith(":"):
+                continue
             labels = node.get("labels", [])
             # Exclude non-entity nodes (Source, Case, Mention, Timeline, Event, Milestone)
             if not any(lbl in excluded_labels for lbl in labels):

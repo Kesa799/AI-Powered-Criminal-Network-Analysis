@@ -13,7 +13,13 @@ class RagService:
     def _init_index(self):
         try:
             if settings.upstash_url and settings.upstash_token:
+                import httpx
                 self.index = Index(url=settings.upstash_url, token=settings.upstash_token)
+                # Ensure Windows certificate issues don't block or delay vector search
+                self.index._client = httpx.Client(
+                    verify=False,
+                    timeout=httpx.Timeout(timeout=5.0, connect=3.0)
+                )
                 logger.info("Upstash Vector initialized successfully.")
         except Exception as e:
             logger.warning(f"Could not connect to Upstash Vector: {e}. Semantic RAG will use fallback.")

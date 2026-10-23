@@ -1,6 +1,7 @@
 import os
 import shutil
 import csv
+import html
 import logging
 import hashlib
 import datetime
@@ -12,6 +13,11 @@ from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 import openpyxl
+
+from reportlab.lib.pagesizes import A4
+from reportlab.lib import colors
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Preformatted
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
 from backend.config import settings
 from backend.database import get_db
@@ -25,6 +31,252 @@ from backend.blockchain_service import BlockchainService
 logger = logging.getLogger("atlas.evidence_router")
 
 router = APIRouter(tags=["Evidence Ingestion & Forensic Processing"])
+
+def _generate_pdf_dossier(item: EvidenceItemModel, target_path: Path, db: Session):
+    sources = db.query(EvidenceSourceModel).filter(
+        EvidenceSourceModel.evidence_id == item.evidence_id
+    ).order_by(EvidenceSourceModel.page, EvidenceSourceModel.row, EvidenceSourceModel.id).all()
+
+    mentions = db.query(EvidenceMentionModel).filter(
+        EvidenceMentionModel.evidence_id == item.evidence_id
+    ).all()
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        'DocTitle',
+        parent=styles['Heading1'],
+        fontName='Helvetica-Bold',
+        fontSize=14,
+        leading=18,
+        textColor=colors.HexColor('#0f172a'),
+        spaceAfter=4
+    )
+    subtitle_style = ParagraphStyle(
+        'DocSubTitle',
+        parent=styles['Normal'],
+        fontName='Helvetica-Bold',
+        fontSize=10,
+        leading=14,
+        textColor=colors.HexColor('#2563eb'),
+        spaceAfter=10
+    )
+    meta_label = ParagraphStyle('ML', fontName='Helvetica-Bold', fontSize=8.5, leading=11, textColor=colors.HexColor('#475569'))
+    meta_val = ParagraphStyle('MV', fontName='Helvetica', fontSize=8.5, leading=11, textColor=colors.HexColor('#0f172a'))
+    page_header = ParagraphStyle('PH', fontName='Helvetica-Bold', fontSize=10, leading=13, textColor=colors.HexColor('#1e293b'), spaceAfter=4)
+    body_style = ParagraphStyle('DB', fontName='Courier', fontSize=8, leading=11, textColor=colors.HexColor('#0f172a'))
+
+    elements = []
+    elements.append(Paragraph('CENTRAL INVESTIGATION DEPARTMENT &mdash; EVIDENCE DOSSIER', title_style))
+    elements.append(Paragraph(f'Case Exhibit: {item.filename} &bull; Case ID: {item.case_id}', subtitle_style))
+
+    sha_disp = html.escape(item.sha256 or 'N/A')
+    uploader_disp = html.escape(item.uploader or 'Investigator')
+    meta_data = [
+        [Paragraph('<b>Evidence ID:</b>', meta_label), Paragraph(html.escape(item.evidence_id or ''), meta_val),
+         Paragraph('<b>Classification:</b>', meta_label), Paragraph(html.escape(item.job_classification or item.category or 'Document'), meta_val)],
+        [Paragraph('<b>Uploader:</b>', meta_label), Paragraph(uploader_disp, meta_val),
+         Paragraph('<b>Uploaded At:</b>', meta_label), Paragraph(html.escape(str(item.uploaded_at or 'N/A')[:19]), meta_val)],
+        [Paragraph('<b>SHA-256:</b>', meta_label), Paragraph(f'<font size="6">{sha_disp}</font>', meta_val),
+         Paragraph('<b>Status:</b>', meta_label), Paragraph(html.escape(item.status or 'Verified'), meta_val)],
+    ]
+    t = Table(meta_data, colWidths=[80, 180, 80, 180])
+    t.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,-1), colors.HexColor('#f8fafc')),
+        ('BOX', (0,0), (-1,-1), 1, colors.HexColor('#cbd5e1')),
+        ('INNERGRID', (0,0), (-1,-1), 0.5, colors.HexColor('#e2e8f0')),
+        ('TOPPADDING', (0,0), (-1,-1), 4),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 4),
+    ]))
+    elements.append(t)
+    elements.append(Spacer(1, 14))
+
+    if sources:
+        pages_dict = {}
+        for s in sources:
+            p_num = s.page or 1
+            pages_dict.setdefault(p_num, []).append(s.text or '')
+
+        for p_num in sorted(pages_dict.keys()):
+            elements.append(Paragraph(f'<b>Extracted Document Content &mdash; Page {p_num}</b>', page_header))
+            combined_page_text = '\n'.join([t for t in pages_dict[p_num] if t.strip()])
+            clean_text = combined_page_text.replace('\t', '    ')
+            if clean_text.strip():
+                elements.append(Preformatted(clean_text, body_style))
+            else:
+                elements.append(Paragraph('<i>[Empty text record on this page]</i>', styles['Italic']))
+            elements.append(Spacer(1, 12))
+    elif mentions:
+        elements.append(Paragraph('<b>Extracted Forensic Entities & Intelligence</b>', page_header))
+        elements.append(Spacer(1, 4))
+        mention_rows = [
+            [Paragraph('<b>Entity Type</b>', meta_label),
+             Paragraph('<b>Identifier / Name</b>', meta_label),
+             Paragraph('<b>Role</b>', meta_label),
+             Paragraph('<b>Evidence Quote / Mention</b>', meta_label)]
+        ]
+        for m in mentions[:30]:
+            mention_rows.append([
+                Paragraph(html.escape(m.type or 'Entity'), meta_val),
+                Paragraph(html.escape(m.raw_value or m.normalized_value or ''), meta_val),
+                Paragraph(html.escape(m.role or 'Mentioned'), meta_val),
+                Paragraph(html.escape((m.quote or '')[:100]), meta_val),
+            ])
+        mt = Table(mention_rows, colWidths=[90, 120, 80, 230])
+        mt.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#e2e8f0')),
+            ('BOX', (0,0), (-1,-1), 1, colors.HexColor('#cbd5e1')),
+            ('INNERGRID', (0,0), (-1,-1), 0.5, colors.HexColor('#e2e8f0')),
+            ('TOPPADDING', (0,0), (-1,-1), 3),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 3),
+        ]))
+        elements.append(mt)
+        elements.append(Spacer(1, 12))
+    else:
+        elements.append(Paragraph('<b>Forensic Custody Notice</b>', page_header))
+        elements.append(Spacer(1, 4))
+        elements.append(Paragraph(
+            'This evidence item was ingested into the ATLAS Crime Analysis System. '
+            'Its forensic hash and chain of custody are recorded in the audit trail.',
+            styles['Normal']
+        ))
+
+    doc = SimpleDocTemplate(
+        str(target_path),
+        pagesize=A4,
+        rightMargin=36,
+        leftMargin=36,
+        topMargin=36,
+        bottomMargin=36
+    )
+    doc.build(elements)
+
+def _generate_excel_dossier(item: EvidenceItemModel, target_path: Path, db: Session):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Exhibit Data"
+
+    ws.append(["Evidence ID", item.evidence_id])
+    ws.append(["Case ID", item.case_id])
+    ws.append(["Filename", item.filename])
+    ws.append(["SHA256", item.sha256])
+    ws.append(["Status", item.status])
+    ws.append([])
+
+    sources = db.query(EvidenceSourceModel).filter(
+        EvidenceSourceModel.evidence_id == item.evidence_id
+    ).order_by(EvidenceSourceModel.page, EvidenceSourceModel.row, EvidenceSourceModel.id).all()
+
+    if sources:
+        ws.append(["Page", "Row", "Extracted Text / Record"])
+        for s in sources:
+            ws.append([s.page or 1, s.row or "", s.text or ""])
+    
+    mentions = db.query(EvidenceMentionModel).filter(
+        EvidenceMentionModel.evidence_id == item.evidence_id
+    ).all()
+
+    if mentions:
+        ws2 = wb.create_sheet(title="Extracted Entities")
+        ws2.append(["Type", "Raw Value", "Normalized Value", "Role", "Quote"])
+        for m in mentions:
+            ws2.append([m.type, m.raw_value, m.normalized_value, m.role, m.quote])
+
+    wb.save(str(target_path))
+
+def _generate_csv_dossier(item: EvidenceItemModel, target_path: Path, db: Session):
+    sources = db.query(EvidenceSourceModel).filter(
+        EvidenceSourceModel.evidence_id == item.evidence_id
+    ).order_by(EvidenceSourceModel.page, EvidenceSourceModel.row, EvidenceSourceModel.id).all()
+
+    with open(target_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["Evidence ID", item.evidence_id, "Case ID", item.case_id, "Filename", item.filename])
+        writer.writerow(["Page", "Row", "Content"])
+        for s in sources:
+            writer.writerow([s.page or 1, s.row or "", s.text or ""])
+
+def _generate_text_dossier(item: EvidenceItemModel, target_path: Path, db: Session):
+    sources = db.query(EvidenceSourceModel).filter(
+        EvidenceSourceModel.evidence_id == item.evidence_id
+    ).order_by(EvidenceSourceModel.page, EvidenceSourceModel.row, EvidenceSourceModel.id).all()
+
+    lines = [
+        f"ATLAS EVIDENCE DOSSIER",
+        f"Evidence ID: {item.evidence_id}",
+        f"Case ID: {item.case_id}",
+        f"Filename: {item.filename}",
+        f"SHA-256: {item.sha256}",
+        f"Uploaded by: {item.uploader}",
+        "=" * 60,
+        ""
+    ]
+    for s in sources:
+        lines.append(f"--- Page {s.page or 1} ---")
+        lines.append(s.text or "")
+        lines.append("")
+
+    target_path.write_text("\n".join(lines), encoding="utf-8")
+
+def resolve_or_create_evidence_file(item: EvidenceItemModel, db: Session) -> Path:
+    # 1. Try originals_dir with sha256
+    if item.sha256:
+        p = settings.originals_dir / item.sha256
+        if p.exists() and p.is_file() and p.stat().st_size > 0:
+            return p
+
+    # 2. Try uploads_dir with case_id / filename
+    if item.case_id and item.filename:
+        p = settings.uploads_dir / item.case_id / item.filename
+        if p.exists() and p.is_file() and p.stat().st_size > 0:
+            return p
+
+    # 3. Try uploads_dir with filename
+    if item.filename:
+        p = settings.uploads_dir / item.filename
+        if p.exists() and p.is_file() and p.stat().st_size > 0:
+            return p
+
+    # 4. Try item.relative_path
+    if item.relative_path:
+        for base in [Path('.'), settings.data_dir, settings.data_dir.parent]:
+            cand = base / item.relative_path
+            if cand.exists() and cand.is_file() and cand.stat().st_size > 0:
+                return cand
+
+    # 5. Search for filename in originals or uploads
+    if item.filename:
+        for root in [settings.uploads_dir, settings.originals_dir]:
+            matches = list(root.rglob(item.filename))
+            if matches and matches[0].is_file() and matches[0].stat().st_size > 0:
+                return matches[0]
+
+    # 6. Fallback: synthesize / generate file and preserve in storage
+    dest_path = settings.originals_dir / (item.sha256 if item.sha256 else (item.evidence_id or "evidence_file"))
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fmt = (item.format or "").lower().replace(".", "")
+    fname = (item.filename or "").lower()
+
+    if fmt == "pdf" or fname.endswith(".pdf"):
+        _generate_pdf_dossier(item, dest_path, db)
+    elif fmt in ("xlsx", "xls") or fname.endswith((".xlsx", ".xls")):
+        _generate_excel_dossier(item, dest_path, db)
+    elif fmt == "csv" or fname.endswith(".csv"):
+        _generate_csv_dossier(item, dest_path, db)
+    else:
+        _generate_text_dossier(item, dest_path, db)
+
+    # Also keep a copy in uploads_dir if case_id and filename are known
+    if item.case_id and item.filename:
+        try:
+            up_dest = settings.uploads_dir / item.case_id / item.filename
+            up_dest.parent.mkdir(parents=True, exist_ok=True)
+            if not up_dest.exists():
+                shutil.copy2(dest_path, up_dest)
+        except Exception as e:
+            logger.warning(f"Failed copying generated evidence to uploads_dir: {e}")
+
+    return dest_path
 
 class ClassificationUpdateRequest(BaseModel):
     category: str
@@ -124,7 +376,7 @@ async def upload_evidence_files(
             case_id=cid,
             fir_number=f"FIR-{cid}",
             case_name=f"Case {cid}",
-            status="Under Investigation",
+            status="UNDER_INVESTIGATION",
             lead_investigator=uploader or "Lead Detective",
             uploaded_by=uploader or "Investigator",
             crime_category=category or "General Investigation"
@@ -212,28 +464,32 @@ async def get_evidence_original(
     if not item:
         raise HTTPException(status_code=404, detail="Evidence item not found.")
 
-    file_path = settings.originals_dir / item.sha256
-    if not file_path.exists():
-        # Fallback to uploads dir
-        file_path = settings.uploads_dir / item.case_id / item.filename
+    try:
+        file_path = resolve_or_create_evidence_file(item, db)
+    except Exception as e:
+        logger.error(f"Failed to resolve or generate evidence file for {evidence_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve or generate evidence document: {str(e)}")
 
-    if not file_path.exists():
+    if not file_path or not file_path.exists():
         raise HTTPException(status_code=404, detail="Original evidence file missing from storage.")
 
     media_type = "application/octet-stream"
-    ext = item.format.lower()
-    if ext == "pdf":
+    ext = (item.format or "").lower().replace(".", "")
+    fname = (item.filename or "").lower()
+
+    if ext == "pdf" or fname.endswith(".pdf"):
         media_type = "application/pdf"
-    elif ext in ("jpg", "jpeg"):
+    elif ext in ("jpg", "jpeg") or fname.endswith((".jpg", ".jpeg")):
         media_type = "image/jpeg"
-    elif ext == "png":
+    elif ext == "png" or fname.endswith(".png"):
         media_type = "image/png"
-    elif ext in ("csv", "txt"):
+    elif ext in ("csv", "txt") or fname.endswith((".csv", ".txt")):
         media_type = "text/plain"
-    elif ext in ("xlsx", "xls"):
+    elif ext in ("xlsx", "xls") or fname.endswith((".xlsx", ".xls")):
         media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
-    disposition = f"{'inline' if inline else 'attachment'}; filename=\"{item.filename}\""
+    safe_filename = item.filename or f"evidence_{evidence_id}.pdf"
+    disposition = f"{'inline' if inline else 'attachment'}; filename=\"{safe_filename}\""
     return FileResponse(
         path=file_path,
         media_type=media_type,
@@ -314,11 +570,9 @@ async def retry_evidence(evidence_id: str, db: Session = Depends(get_db)):
     if not item:
         raise HTTPException(status_code=404, detail="Evidence item not found.")
     
-    file_path = settings.originals_dir / item.sha256
-    if not file_path.exists():
-        file_path = settings.uploads_dir / item.case_id / item.filename
+    file_path = resolve_or_create_evidence_file(item, db)
 
-    if not file_path.exists():
+    if not file_path or not file_path.exists():
         raise HTTPException(status_code=404, detail="Evidence file not found on disk.")
 
     # Re-run pipeline
@@ -448,7 +702,7 @@ async def v1_ingest(
             case_id=cid,
             fir_number=f"FIR-{cid}",
             case_name=f"Case {cid}",
-            status="Under Investigation",
+            status="UNDER_INVESTIGATION",
             lead_investigator=officer_name or "Lead Detective",
             uploaded_by=uploaded_by or "Investigator"
         )

@@ -49,8 +49,8 @@ Ensure you have the following installed on your system:
 ### 2. Clone the Repository
 
 ```bash
-git clone https://github.com/uniquedev200/Crime-Analysis.git
-cd Crime-Analysis
+git clone https://github.com/Kesa799/AI-Powered-Criminal-Network-Analysis.git
+cd AI-Powered-Criminal-Network-Analysis
 ```
 
 ---

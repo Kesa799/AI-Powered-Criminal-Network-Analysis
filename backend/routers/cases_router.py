@@ -1,5 +1,6 @@
 import datetime
 import hashlib
+import re
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
@@ -17,11 +18,143 @@ from backend.blockchain_service import BlockchainService
 
 router = APIRouter(prefix="/api/cases", tags=["Case Management & Intelligence"])
 
+def extract_case_fir_details(c: CaseModel, db: Session) -> Dict[str, Any]:
+    fir_item = db.query(EvidenceItemModel).filter(
+        EvidenceItemModel.case_id == c.case_id,
+        EvidenceItemModel.filename.ilike('%FIR%')
+    ).first()
+
+    data = {
+        'fir_number': c.fir_number or f"FIR-{c.case_id}",
+        'fir_description': c.summary or "",
+        'occurrence_date': c.date_filed or "",
+        'occurrence_time': "",
+        'place_of_occurrence': "",
+        'total_value': "",
+        'complainant': c.victim or "",
+        'police_station': "",
+        'assigned_officer': c.lead_investigator or ""
+    }
+
+    if not fir_item:
+        if not data['fir_description']:
+            data['fir_description'] = (
+                f"Investigation docket for {c.case_name} registered under FIR {data['fir_number']}. "
+                f"Crime Category: {c.crime_category or 'General Investigation'}. Status: {c.status or 'UNDER_INVESTIGATION'}."
+            )
+        return data
+
+    sources = db.query(EvidenceSourceModel).filter(
+        EvidenceSourceModel.evidence_id == fir_item.evidence_id
+    ).order_by(EvidenceSourceModel.page).all()
+
+    if not sources:
+        if not data['fir_description']:
+            data['fir_description'] = (
+                f"Investigation docket for {c.case_name} registered under FIR {data['fir_number']}. "
+                f"Crime Category: {c.crime_category or 'General Investigation'}. Status: {c.status or 'UNDER_INVESTIGATION'}."
+            )
+        return data
+
+    # Page 1 parsing
+    p1 = sources[0].text or ''
+    p1_lines = [l.strip() for l in p1.splitlines() if l.strip()]
+
+    val_start = None
+    for idx, l in enumerate(p1_lines):
+        if 'Particulars of properties' in l:
+            val_start = idx + 1
+            break
+
+    comp_name = None
+    comp_occ = None
+    if val_start is not None and val_start < len(p1_lines):
+        vals = p1_lines[val_start:]
+        if len(vals) > 1 and vals[0] != 'Not recorded':
+            data['police_station'] = f"{vals[0]} {vals[1]} Police Station"
+        if len(vals) > 3 and 'SYN-' in vals[3]:
+            data['fir_number'] = vals[3]
+        if len(vals) > 4 and re.match(r'^\d{2}-\d{2}-\d{4}$', vals[4]):
+            data['date_filed'] = vals[4]
+
+        for v_idx, v in enumerate(vals):
+            if v in ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']:
+                if v_idx + 1 < len(vals) and re.match(r'^\d{2}-\d{2}-\d{4}$', vals[v_idx+1]):
+                    data['occurrence_date'] = f"{vals[v_idx+1]} ({v})"
+                if v_idx + 2 < len(vals) and ('-' in vals[v_idx+2] or ':' in vals[v_idx+2]):
+                    data['occurrence_time'] = f"{vals[v_idx+2]} hrs"
+            if any(term in v for term in ['Street', 'Road', 'Nagar', 'Market', 'Lane', 'Depot', 'Yard', 'Arcade', 'Foundry', 'Civic', 'Canal', 'Ring']):
+                if not data['place_of_occurrence'] and 'Police' not in v:
+                    data['place_of_occurrence'] = v
+            if any(term in v for term in ['Local business operator', 'Workshop manager', 'Store supervisor', 'Resident', 'Shopkeeper', 'Manager', 'Supervisor', 'Warehouse supervisor']):
+                comp_occ = v
+            if re.match(r'^[A-Z][a-z]+ [A-Z][a-z]+$', v):
+                if not comp_name and v not in ['Anaya Sen', 'Vikram Rathore', 'Pending classification']:
+                    comp_name = v
+
+    if comp_name:
+        data['complainant'] = f"{comp_name} ({comp_occ})" if comp_occ else comp_name
+    elif comp_occ:
+        data['complainant'] = comp_occ
+
+    # Page 2 parsing
+    if len(sources) > 1:
+        p2 = sources[1].text or ''
+        p2_lines = [l.strip() for l in p2.splitlines() if l.strip()]
+
+        for l in p2_lines:
+            if re.match(r'^INR\s+[\d,]+', l):
+                data['total_value'] = l
+                break
+
+        for idx, l in enumerate(p2_lines):
+            if l in ['Inspector', 'Sub-Inspector']:
+                if idx > 0 and p2_lines[idx-1] not in ['Signature of the Officer-in-charge, Police Station', 'Rank']:
+                    data['assigned_officer'] = f"{l} {p2_lines[idx-1]}"
+                    break
+
+        narrative_lines = []
+        started = False
+        for l in p2_lines:
+            if l == 'Not applicable':
+                started = True
+                continue
+            if started:
+                if any(k in l for k in ['Inspector', 'Sub-Inspector', 'SYN-O-', 'Not transferred', 'Date & time of despatch']):
+                    break
+                narrative_lines.append(l)
+
+        if narrative_lines:
+            raw_desc = ' '.join(narrative_lines).strip()
+            if data.get('assigned_officer'):
+                off_name = data['assigned_officer'].split(' ', 1)[-1].strip()
+                if off_name and raw_desc.endswith(off_name):
+                    raw_desc = raw_desc[:-len(off_name)].strip()
+            data['fir_description'] = raw_desc
+
+    if not data['fir_description']:
+        data['fir_description'] = c.summary or (
+            f"Investigation docket for {c.case_name} registered under FIR {data['fir_number']}. "
+            f"Crime Category: {c.crime_category or 'General Investigation'}. Status: {c.status or 'UNDER_INVESTIGATION'}."
+        )
+
+    # Persist back to c.summary if missing or generic
+    if not c.summary or c.summary.startswith("Investigation docket "):
+        c.summary = data['fir_description']
+        if data.get('fir_number'):
+            c.fir_number = data['fir_number']
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+
+    return data
+
 class CaseCreateRequest(BaseModel):
     case_id: str
     case_name: str
     fir_number: Optional[str] = None
-    status: Optional[str] = "Under Investigation"
+    status: Optional[str] = "UNDER_INVESTIGATION"
     lead_investigator: Optional[str] = "Lead Investigator"
     uploaded_by: Optional[str] = None
     severity: Optional[str] = "High"
@@ -50,19 +183,28 @@ async def list_cases(
     for c in cases:
         ev_count = db.query(EvidenceItemModel).filter(EvidenceItemModel.case_id == c.case_id).count()
         ent_count = db.query(EvidenceMentionModel).filter(EvidenceMentionModel.case_id == c.case_id).count()
+        fir_details = extract_case_fir_details(c, db)
         results.append({
             "case_id": c.case_id,
-            "fir_number": c.fir_number or f"FIR-{c.case_id}",
+            "fir_number": fir_details.get("fir_number") or c.fir_number or f"FIR-{c.case_id}",
             "case_name": c.case_name,
             "status": c.status,
-            "lead_investigator": c.lead_investigator,
+            "lead_investigator": fir_details.get("assigned_officer") or c.lead_investigator,
             "uploaded_by": c.uploaded_by,
             "severity": c.severity,
             "crime_category": c.crime_category,
             "primary_suspect": c.primary_suspect,
-            "victim": c.victim,
-            "date_filed": c.date_filed or c.created_at.strftime("%Y-%m-%d"),
-            "summary": c.summary,
+            "victim": fir_details.get("complainant") or c.victim,
+            "date_filed": fir_details.get("date_filed") or c.date_filed or (c.created_at.strftime("%Y-%m-%d") if c.created_at else None),
+            "summary": fir_details.get("fir_description") or c.summary,
+            "fir_description": fir_details.get("fir_description") or c.summary,
+            "occurrence_date": fir_details.get("occurrence_date"),
+            "occurrence_time": fir_details.get("occurrence_time"),
+            "place_of_occurrence": fir_details.get("place_of_occurrence"),
+            "total_value": fir_details.get("total_value"),
+            "complainant": fir_details.get("complainant") or c.victim,
+            "police_station": fir_details.get("police_station"),
+            "assigned_officer": fir_details.get("assigned_officer") or c.lead_investigator,
             "total_entities": ent_count if ent_count > 0 else c.total_entities,
             "evidences": c.evidences or [],
             "evidence_count": ev_count,
@@ -105,7 +247,7 @@ async def create_case(req: CaseCreateRequest, db: Session = Depends(get_db)):
         case_id=cid,
         fir_number=req.fir_number or f"FIR-{cid}",
         case_name=req.case_name.strip(),
-        status=req.status or "Under Investigation",
+        status=req.status or "UNDER_INVESTIGATION",
         lead_investigator=req.lead_investigator or "Lead Detective",
         uploaded_by=req.uploaded_by,
         severity=req.severity or "High",
@@ -150,19 +292,29 @@ async def get_case(case_id: str, db: Session = Depends(get_db)):
     ev_count = db.query(EvidenceItemModel).filter(EvidenceItemModel.case_id == case_id).count()
     ent_count = db.query(EvidenceMentionModel).filter(EvidenceMentionModel.case_id == case_id).count()
 
+    fir_details = extract_case_fir_details(c, db)
+
     return {
         "case_id": c.case_id,
-        "fir_number": c.fir_number or f"FIR-{c.case_id}",
+        "fir_number": fir_details.get("fir_number") or c.fir_number or f"FIR-{c.case_id}",
         "case_name": c.case_name,
         "status": c.status,
-        "lead_investigator": c.lead_investigator,
+        "lead_investigator": fir_details.get("assigned_officer") or c.lead_investigator,
         "uploaded_by": c.uploaded_by,
         "severity": c.severity,
         "crime_category": c.crime_category,
         "primary_suspect": c.primary_suspect,
-        "victim": c.victim,
-        "date_filed": c.date_filed,
-        "summary": c.summary,
+        "victim": fir_details.get("complainant") or c.victim,
+        "date_filed": fir_details.get("date_filed") or c.date_filed or (c.created_at.strftime("%Y-%m-%d") if c.created_at else None),
+        "summary": fir_details.get("fir_description") or c.summary,
+        "fir_description": fir_details.get("fir_description") or c.summary,
+        "occurrence_date": fir_details.get("occurrence_date"),
+        "occurrence_time": fir_details.get("occurrence_time"),
+        "place_of_occurrence": fir_details.get("place_of_occurrence"),
+        "total_value": fir_details.get("total_value"),
+        "complainant": fir_details.get("complainant") or c.victim,
+        "police_station": fir_details.get("police_station"),
+        "assigned_officer": fir_details.get("assigned_officer") or c.lead_investigator,
         "total_entities": ent_count if ent_count > 0 else c.total_entities,
         "evidences": c.evidences or [],
         "evidence_count": ev_count,

@@ -310,9 +310,23 @@ $env:ATLAS_PORT=8001; $env:LLM_MODEL="qwen/qwen3.8-27b"
 $env:LLM_CHUNK_CHARS=3000; $env:LLM_MAX_COMPLETION_TOKENS=1000;    python run.py
 
 # One ingest worker per instance, each taking a disjoint shard of the dataset.
-python scripts/ingest_dataset.py --base http://127.0.0.1:8000 --shard 0 --num-shards 2
-python scripts/ingest_dataset.py --base http://127.0.0.1:8001 --shard 1 --num-shards 2
+# --chunk-chars must match the LLM_CHUNK_CHARS of the server each worker talks to.
+python scripts/ingest_dataset.py --base http://127.0.0.1:8000 --shard 0 --num-shards 2 --chunk-chars 12000
+python scripts/ingest_dataset.py --base http://127.0.0.1:8001 --shard 1 --num-shards 2 --chunk-chars 3000
 ```
+
+**Waiting for a document, not for a request.** The provider's "try again in Xs" hint is
+computed for the request that was refused, so after waiting that long the bucket holds
+exactly enough room for that one chunk. A document is extracted in several chunks and
+each chunk is charged against the same bucket, so a document that starts with only one
+chunk's worth of room free is refused at its second chunk - after the first chunk has
+already been paid for. A worker that waits only for the hint therefore never gets past
+the first chunk of a multi-chunk document, and pays for that chunk again on every
+attempt. The ingest script waits for the provider's hint **and** for the budget to refill
+with the document's own cost, estimated from the extracted text and the server's chunk
+size. The estimate is deliberately generous: over-estimating only lengthens the wait,
+while under-estimating leaves the later chunks of a document both unpaid-for and
+paid-for twice.
 
 The `x-ratelimit-*` headers are **not** the signal for the daily condition: on a refused
 request they still show a full per-minute budget, because the daily check happens first.

@@ -146,10 +146,41 @@ export function AuthModule({ setOfficerSession, changeView, addToast, onClose, i
       {screen === 'signin' && <div className="auth-recovery"><button type="button" className="auth-text-link" disabled={busy} onClick={() => go('forgot')}>Forgot password?</button></div>}
       {isRegister && <p className="auth-field-hint">Use at least 8 characters for your password.</p>}
       {error && <div className="atlas-auth-error" role="alert">{error}</div>}
-      <button type="submit" disabled={busy || isVerify} aria-describedby={isVerify ? 'otp-service-status' : undefined} aria-busy={busy} className="atlas-auth-submit atlas-auth-submit-compact">{busy ? (isRegister ? 'Creating account…' : 'Signing in…') : isVerify ? 'Verify and create account' : isRegister ? (REQUIRE_EMAIL_VERIFICATION ? 'Verify email' : 'Create account') : 'Sign in'}<span aria-hidden="true">→</span></button>
+      {screen === 'signin' ? (
+        <div className="auth-btn-row">
+          <button
+            type="submit"
+            disabled={busy}
+            aria-busy={busy}
+            className="atlas-auth-submit atlas-auth-submit-compact"
+          >
+            {busy ? 'Signing in…' : 'Sign in'}<span aria-hidden="true">→</span>
+          </button>
+          <button
+            type="button"
+            className="atlas-auth-submit atlas-auth-submit-compact auth-demo-login"
+            disabled={busy}
+            onClick={demoLogin}
+          >
+            Demo login<span aria-hidden="true">→</span>
+          </button>
+        </div>
+      ) : (
+        <button
+          type="submit"
+          disabled={busy || isVerify}
+          aria-describedby={isVerify ? 'otp-service-status' : undefined}
+          aria-busy={busy}
+          className="atlas-auth-submit atlas-auth-submit-compact"
+        >
+          {busy ? (isRegister ? 'Creating account…' : 'Signing in…') : isVerify ? 'Verify and create account' : isRegister ? (REQUIRE_EMAIL_VERIFICATION ? 'Verify email' : 'Create account') : 'Sign in'}<span aria-hidden="true">→</span>
+        </button>
+      )}
       {isVerify && <div className="auth-resend"><button type="button" className="auth-text-link" onClick={() => setNotice('A new code cannot be sent until email verification is connected.')}>Resend code</button><p role="status">{notice}</p></div>}
     </form>}
-    <button type="button" className="atlas-auth-submit atlas-auth-submit-compact auth-demo-login" disabled={busy} onClick={demoLogin}>Demo login<span aria-hidden="true">→</span></button>
+    {screen !== 'signin' && (
+      <button type="button" className="atlas-auth-submit atlas-auth-submit-compact auth-demo-login" disabled={busy} onClick={demoLogin}>Demo login<span aria-hidden="true">→</span></button>
+    )}
     {screen !== 'forgot' && <p className="auth-account-link">{screen === 'signin' ? 'New to ATLAS? ' : 'Already have an account? '}<button type="button" className="auth-text-link" disabled={busy} onClick={() => go(screen === 'signin' ? 'register' : 'signin')}>{screen === 'signin' ? 'Create account' : 'Sign in'}</button></p>}
     {isModal && onClose && <button type="button" className="atlas-auth-back" disabled={busy} onClick={onClose}>Close</button>}
   </section>;

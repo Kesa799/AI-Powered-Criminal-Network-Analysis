@@ -1,0 +1,422 @@
+/* ATLAS Official Law Enforcement Investigation Report Styling */
+
+.official-report-document {
+  background: #ffffff;
+  color: #0f172a;
+  max-width: 920px;
+  margin: 0 auto;
+  padding: 44px 52px;
+  border-radius: 8px;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.07);
+  border: 1px solid #e2e8f0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  line-height: 1.55;
+  font-size: 13px;
+}
+
+/* Formal Header */
+.report-header-emblem {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 2px solid #0f172a;
+  padding-bottom: 16px;
+  margin-bottom: 20px;
+}
+
+.report-header-left {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.report-crest-svg {
+  width: 52px;
+  height: 52px;
+  color: #1e3a8a;
+  flex-shrink: 0;
+}
+
+.report-header-titles h1 {
+  font-size: 17px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #0f172a;
+  margin: 0;
+  line-height: 1.25;
+}
+
+.report-header-titles h2 {
+  font-size: 13px;
+  font-weight: 700;
+  color: #1e40af;
+  margin: 2px 0 0 0;
+  letter-spacing: 0.02em;
+}
+
+.report-header-titles p {
+  font-size: 11px;
+  color: #64748b;
+  margin: 2px 0 0 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.report-header-badge {
+  text-align: right;
+}
+
+.report-classification-tag {
+  display: inline-block;
+  padding: 4px 10px;
+  background: #fef2f2;
+  color: #991b1b;
+  border: 1.5px solid #f87171;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  border-radius: 4px;
+}
+
+.report-ref-line {
+  font-size: 11px;
+  color: #475569;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  margin-top: 4px;
+}
+
+/* Metadata Grid Table */
+.report-meta-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  border: 1px solid #cbd5e1;
+  margin-bottom: 24px;
+  font-size: 12px;
+  background: #ffffff;
+}
+
+.report-meta-table td {
+  padding: 7px 12px;
+  border-bottom: 1px solid #cbd5e1;
+  border-right: 1px solid #cbd5e1;
+  vertical-align: top;
+}
+
+.report-meta-table tr td:last-child {
+  border-right: none;
+}
+
+.report-meta-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.report-meta-table td.meta-label {
+  background: #f8fafc;
+  color: #475569;
+  font-weight: 700;
+  width: 20%;
+  text-transform: uppercase;
+  font-size: 10.5px;
+  letter-spacing: 0.02em;
+}
+
+.report-meta-table td.meta-val {
+  color: #0f172a;
+  font-weight: 500;
+  width: 30%;
+}
+
+.report-meta-table td.meta-val strong {
+  font-weight: 700;
+}
+
+/* Numbered Report Sections */
+.report-section {
+  margin-bottom: 26px;
+  break-inside: avoid;
+  page-break-inside: avoid;
+}
+
+.report-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1.5px solid #334155;
+  padding-bottom: 5px;
+  margin-bottom: 12px;
+}
+
+.report-section-title {
+  font-size: 13.5px;
+  font-weight: 800;
+  color: #0f172a;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+}
+
+.report-section-subtitle {
+  font-size: 10.5px;
+  color: #64748b;
+  font-weight: 500;
+}
+
+.report-text-block {
+  font-size: 12px;
+  color: #1e293b;
+  line-height: 1.65;
+  text-align: justify;
+  background: #f8fafc;
+  border-left: 3.5px solid #3b82f6;
+  padding: 12px 16px;
+  border-radius: 0 6px 6px 0;
+  margin-bottom: 12px;
+}
+
+.report-key-findings-list {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 14px 0;
+}
+
+.report-key-findings-list li {
+  position: relative;
+  padding-left: 20px;
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: #1e293b;
+  line-height: 1.5;
+}
+
+.report-key-findings-list li::before {
+  content: "■";
+  position: absolute;
+  left: 0;
+  color: #2563eb;
+  font-size: 9px;
+  top: 2px;
+}
+
+/* Formal Data Tables */
+.report-formal-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  border: 1px solid #cbd5e1;
+  font-size: 11.5px;
+  margin-bottom: 16px;
+  background: #ffffff;
+}
+
+.report-formal-table th {
+  background: #f1f5f9;
+  color: #334155;
+  font-weight: 700;
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.03em;
+  padding: 8px 10px;
+  border-bottom: 1px solid #cbd5e1;
+  border-right: 1px solid #cbd5e1;
+  text-align: left;
+}
+
+.report-formal-table th:last-child {
+  border-right: none;
+}
+
+.report-formal-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid #cbd5e1;
+  border-right: 1px solid #cbd5e1;
+  vertical-align: top;
+  color: #1e293b;
+}
+
+.report-formal-table td:last-child {
+  border-right: none;
+}
+
+.report-formal-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.report-formal-table tbody tr:nth-child(even) {
+  background: #fafafa;
+}
+
+.report-formal-table td.hash-col {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 10px;
+  color: #475569;
+}
+
+.report-formal-table td.verified-badge {
+  color: #166534;
+  font-weight: 700;
+  font-size: 10.5px;
+}
+
+/* Pattern Alert Card */
+.report-pattern-row {
+  border: 1px solid #cbd5e1;
+  border-left: 4px solid #f59e0b;
+  background: #fffbeb;
+  padding: 10px 14px;
+  border-radius: 0 6px 6px 0;
+  margin-bottom: 10px;
+  font-size: 11.5px;
+}
+
+.report-pattern-row.critical {
+  border-left-color: #ef4444;
+  background: #fef2f2;
+}
+
+.report-pattern-row-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-weight: 700;
+  color: #0f172a;
+  margin-bottom: 4px;
+}
+
+.report-pattern-desc {
+  color: #334155;
+  line-height: 1.5;
+  margin-bottom: 4px;
+}
+
+.report-pattern-interp {
+  font-size: 11px;
+  color: #1e40af;
+  font-weight: 600;
+  background: #eff6ff;
+  padding: 4px 8px;
+  border-radius: 4px;
+  display: inline-block;
+}
+
+/* Print Media Specific Overrides */
+@media print {
+  @page {
+    size: A4 portrait;
+    margin: 0; /* Hides browser default URL header/footer */
+  }
+
+  html, body {
+    background: #ffffff !important;
+    color: #0f172a !important;
+    margin: 0 !important;
+    padding: 14mm 16mm !important;
+    font-size: 10pt !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  /* Completely remove the black sidebar, skip-link, top header, banners, buttons, and navigation */
+  .app-sidebar,
+  .atlas-sidebar,
+  #app-sidebar,
+  .app-top-header,
+  .top-header,
+  .skip-link,
+  .view-banner,
+  .workspace-tabs,
+  .reports-top-bar,
+  .reports-dashboard-view,
+  .reports-view-toggle,
+  .neu-btn,
+  #toasts,
+  .modal-overlay,
+  nav,
+  aside,
+  button,
+  form,
+  .reports-screen-only {
+    display: none !important;
+    visibility: hidden !important;
+    width: 0 !important;
+    height: 0 !important;
+    position: absolute !important;
+    overflow: hidden !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+
+  /* Reset outer application wrappers so there is zero black margin or sidebar rail background */
+  .app-shell,
+  .app-layout {
+    background: #ffffff !important;
+    min-height: auto !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    display: block !important;
+    border: none !important;
+  }
+
+  .app-content {
+    margin-left: 0 !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    min-height: auto !important;
+    background: #ffffff !important;
+    border-radius: 0 !important;
+    padding: 0 !important;
+    overflow: visible !important;
+    border: none !important;
+    box-shadow: none !important;
+  }
+
+  .main,
+  .atlas-app-layout,
+  .atlas-main-content,
+  .reports-container,
+  .reports-document-wrapper {
+    display: block !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: none !important;
+    box-shadow: none !important;
+    background: #ffffff !important;
+  }
+
+  /* Ensure the official report document spans cleanly across the entire printable width */
+  .official-report-document {
+    display: block !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    box-shadow: none !important;
+    border: none !important;
+    background: #ffffff !important;
+  }
+
+  .report-section {
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+    margin-bottom: 16px !important;
+  }
+
+  .report-formal-table,
+  .report-meta-table {
+    page-break-inside: auto !important;
+    break-inside: auto !important;
+    border: 1px solid #cbd5e1 !important;
+  }
+
+  .report-formal-table tr,
+  .report-meta-table tr {
+    page-break-inside: avoid !important;
+    break-inside: avoid !important;
+  }
+}

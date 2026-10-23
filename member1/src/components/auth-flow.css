@@ -43,3 +43,10 @@
 
 .auth-flow-v2 .auth-demo-login { margin-top: 12px; background: var(--palette-selected); color: var(--palette-text); border: 1px solid var(--palette-border); }
 .auth-flow-v2 .auth-demo-login:hover:not(:disabled) { background: var(--palette-border); }
+
+.auth-flow-v2 .auth-btn-row { display: flex; gap: 10px; margin-top: 18px; width: 100%; }
+.auth-flow-v2 .auth-btn-row .atlas-auth-submit { flex: 1; margin: 0; justify-content: center; gap: 8px; width: auto; }
+@media (max-width: 480px) {
+  .auth-flow-v2 .auth-btn-row { flex-direction: column; gap: 8px; }
+  .auth-flow-v2 .auth-btn-row .atlas-auth-submit { width: 100%; }
+}

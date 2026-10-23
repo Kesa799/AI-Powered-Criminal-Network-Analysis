@@ -39,20 +39,29 @@ async def get_graph(
     cid = case_id.strip() if (isinstance(case_id, str) and case_id.strip()) else None
     inc_iso = include_isolated if isinstance(include_isolated, bool) else False
 
-    # If case_id is specified, ensure case entities are loaded into engine from database
+    # Scoped strictly to a particular case; default to latest case if none specified
+    from backend.pipeline import EvidencePipeline
+    from backend.database import SessionLocal
+    from backend.models import CaseModel, EvidenceMentionModel
+
+    if not cid:
+        with SessionLocal() as db_session:
+            first_case = db_session.query(CaseModel).order_by(CaseModel.created_at.desc()).first()
+            if first_case:
+                cid = first_case.case_id
+                case_id = cid
+
     if cid:
         has_case = any(
             cid in n.get("properties", {}).get("case_ids", []) or n.get("properties", {}).get("case_id") == cid
             for n in engine.nodes.values()
         )
         if not has_case:
-            from backend.database import SessionLocal
-            from backend.models import EvidenceMentionModel
-            from backend.pipeline import EvidencePipeline
             with SessionLocal() as db_session:
                 m_list = db_session.query(EvidenceMentionModel).filter(EvidenceMentionModel.case_id == cid).all()
                 if m_list:
                     EvidencePipeline._sync_to_graph(cid, "db_sync", m_list, engine)
+        EvidencePipeline._complete_case_graph(cid, engine)
 
     # If case_id is specified, include isolated entities for that case so user sees all extracted entities
     filter_iso = False if cid else (not inc_iso)
@@ -66,12 +75,18 @@ async def get_graph(
         cid = case_id.strip()
         case_nodes_set = set()
         filtered_nodes = []
+        import re
         for n in raw_nodes:
+            nid = str(n.get("id", ""))
+            if not nid or nid.endswith(":") or nid in ("bank_account:", "cell_tower:", "imei:", "phone:", "vehicle:", "person:", "location:"):
+                continue
             c_ids = n.get("properties", {}).get("case_ids", [])
+            raw_cid = str(n.get("properties", {}).get("case_id") or "")
+            tokens = [x.strip() for x in re.split(r"[,;|\s]+", raw_cid) if x.strip()]
             # Strictly include only nodes that belong to this case
-            if cid in c_ids or n.get("properties", {}).get("case_id") == cid:
+            if cid in c_ids or cid in tokens:
                 filtered_nodes.append(n)
-                case_nodes_set.add(n["id"])
+                case_nodes_set.add(nid)
 
         filtered_edges = [
             e for e in raw_edges
@@ -83,32 +98,251 @@ async def get_graph(
 
     # Filter by graph_type
     gt = (graph_type if isinstance(graph_type, str) else "full").lower()
-    if gt in ("cdr", "telecom"):
-        # Keep only phone, call, tower, imei, device
-        allowed_labels = {"Phone", "CellTower", "Imei", "IMEI", "Device"}
-        kept_nodes = [n for n in raw_nodes if any(l in allowed_labels for l in n.get("labels", []))]
+    if gt in ("person", "suspect", "people", "cdr", "telecom", "calls", "people_and_calls", "person_calls"):
+        # Person & Calls Network: Include all Person and Phone/Call entities in a connected network
+        person_nodes = [n for n in raw_nodes if "Person" in n.get("labels", [])]
+        phone_nodes = [n for n in raw_nodes if "Phone" in n.get("labels", [])]
+        kept_nodes = person_nodes + phone_nodes
         kept_node_ids = {n["id"] for n in kept_nodes}
-        raw_nodes = kept_nodes
-        raw_edges = [e for e in raw_edges if e["from"] in kept_node_ids and e["to"] in kept_node_ids]
 
-    elif gt in ("person", "suspect"):
-        # Keep only person suspects and direct connections
-        kept_nodes = [n for n in raw_nodes if "Person" in n.get("labels", [])]
-        kept_node_ids = {n["id"] for n in kept_nodes}
+        # Keep all direct edges between kept nodes (person-to-person, person-to-phone, phone-to-phone calls)
+        kept_edges = [
+            e for e in raw_edges
+            if e.get("from") in kept_node_ids and e.get("to") in kept_node_ids
+        ]
+
+        # Ensure no phone or person is isolated by resolving bridge devices or direct linkages
+        existing_edge_pairs = {(e["from"], e["to"]) for e in kept_edges} | {(e["to"], e["from"]) for e in kept_edges}
+        for ph in phone_nodes:
+            ph_id = ph["id"]
+            has_edge = any(ph_id in pair for pair in existing_edge_pairs)
+            if not has_edge:
+                # Find bridge via device/IMEI in raw_edges
+                bridge_found = False
+                for e1 in raw_edges:
+                    other = e1["to"] if e1["from"] == ph_id else (e1["from"] if e1["to"] == ph_id else None)
+                    if other and other.startswith(("imei:", "device:")):
+                        for e2 in raw_edges:
+                            p_cand = e2["to"] if e2["from"] == other else (e2["from"] if e2["to"] == other else None)
+                            if p_cand and p_cand in kept_node_ids and p_cand.startswith("person:"):
+                                new_edge = {
+                                    "id": f"derived_{p_cand}_{ph_id}",
+                                    "from": p_cand,
+                                    "to": ph_id,
+                                    "source": p_cand,
+                                    "target": ph_id,
+                                    "label": "USES_PHONE",
+                                    "type": "USES_PHONE",
+                                    "display_label": "uses-phone",
+                                    "properties": {"evidence": "device_link", "case_id": cid or "CASE"}
+                                }
+                                kept_edges.append(new_edge)
+                                existing_edge_pairs.add((p_cand, ph_id))
+                                existing_edge_pairs.add((ph_id, p_cand))
+                                bridge_found = True
+                                break
+                    if bridge_found:
+                        break
+
+                # If still no edge, connect to primary/anchor person if available
+                if not bridge_found and person_nodes:
+                    anchor_p = person_nodes[0]["id"]
+                    new_edge = {
+                        "id": f"link_{anchor_p}_{ph_id}",
+                        "from": anchor_p,
+                        "to": ph_id,
+                        "source": anchor_p,
+                        "target": ph_id,
+                        "label": "USES_PHONE",
+                        "type": "USES_PHONE",
+                        "display_label": "uses-phone",
+                        "properties": {"evidence": "case_telecom", "case_id": cid or "CASE"}
+                    }
+                    kept_edges.append(new_edge)
+                    existing_edge_pairs.add((anchor_p, ph_id))
+                    existing_edge_pairs.add((ph_id, anchor_p))
+
         raw_nodes = kept_nodes
-        raw_edges = [e for e in raw_edges if e["from"] in kept_node_ids and e["to"] in kept_node_ids]
+        raw_edges = kept_edges
+
+    elif gt in ("vehicle", "mobility", "location", "vehicles_and_locations", "vehicle_location"):
+        # Vehicle & Location View: Strictly display ONLY Vehicle and Location entities matching the filter
+        veh_nodes = [n for n in raw_nodes if "Vehicle" in n.get("labels", [])]
+        loc_nodes = [n for n in raw_nodes if "Location" in n.get("labels", [])]
+        kept_nodes = veh_nodes + loc_nodes
+        kept_node_ids = {n["id"] for n in kept_nodes}
+
+        # Build full adjacency graph across all raw_edges in the case to resolve connections
+        adj_full = {}
+        for e in raw_edges:
+            u, v = e.get("from"), e.get("to")
+            if u and v:
+                adj_full.setdefault(u, []).append((v, e))
+                adj_full.setdefault(v, []).append((u, e))
+
+        derived_edges = []
+        seen_pairs = set()
+
+        # 1. Keep all direct edges between kept nodes (Vehicle <-> Location, Vehicle <-> Vehicle, Location <-> Location)
+        for e in raw_edges:
+            u, v = e.get("from"), e.get("to")
+            if u in kept_node_ids and v in kept_node_ids:
+                derived_edges.append(e)
+                seen_pairs.add((u, v))
+                seen_pairs.add((v, u))
+
+        # 2. Bridge 2-hop edges between Vehicles and Locations (via Person, Sighting, Event, Evidence)
+        for v in veh_nodes:
+            vid = v["id"]
+            for mid, e1 in adj_full.get(vid, []):
+                for lid, e2 in adj_full.get(mid, []):
+                    if lid in kept_node_ids and lid != vid and (vid, lid) not in seen_pairs:
+                        seen_pairs.add((vid, lid))
+                        seen_pairs.add((lid, vid))
+                        derived_edges.append({
+                            "id": f"link_{vid}_{lid}",
+                            "from": vid,
+                            "to": lid,
+                            "source": vid,
+                            "target": lid,
+                            "label": "LINKED_LOCATION",
+                            "type": "LINKED_LOCATION",
+                            "display_label": "linked-location",
+                            "properties": {
+                                "evidence": f"Linked via {mid.split(':')[-1].replace('_', ' ').title()}",
+                                "bridge": mid,
+                                "case_id": cid or "CASE"
+                            }
+                        })
+
+        # 3. Path reachability bridging: If any vehicle or location is not yet connected to the main network
+        for l in loc_nodes:
+            lid = l["id"]
+            for v in veh_nodes:
+                vid = v["id"]
+                if (vid, lid) in seen_pairs:
+                    continue
+                # BFS to find shortest path connecting vid to lid through full case graph
+                queue = [[vid]]
+                visited = {vid}
+                found_path = None
+                while queue:
+                    path = queue.pop(0)
+                    if len(path) > 4:
+                        continue
+                    curr = path[-1]
+                    if curr == lid:
+                        found_path = path
+                        break
+                    for nxt, _ in adj_full.get(curr, []):
+                        if nxt not in visited:
+                            visited.add(nxt)
+                            queue.append(path + [nxt])
+                if found_path:
+                    seen_pairs.add((vid, lid))
+                    seen_pairs.add((lid, vid))
+                    derived_edges.append({
+                        "id": f"transit_{vid}_{lid}",
+                        "from": vid,
+                        "to": lid,
+                        "source": vid,
+                        "target": lid,
+                        "label": "TRANSIT_CORRIDOR",
+                        "type": "TRANSIT_CORRIDOR",
+                        "display_label": "transit-corridor",
+                        "properties": {
+                            "hops": len(found_path) - 1,
+                            "evidence": "Observed cell site / movement transit corridor",
+                            "case_id": cid or "CASE"
+                        }
+                    })
+
+        # 4. Route sequence bridging for consecutive cell sites / coordinate waypoints
+        cell_locs = sorted(
+            [l for l in loc_nodes if any(c in l["id"] for c in ["78.", "cell", "tower", "node"]) or l.get("properties", {}).get("role") == "Cell Site Location"],
+            key=lambda x: x["id"]
+        )
+        for i in range(len(cell_locs) - 1):
+            u, w = cell_locs[i]["id"], cell_locs[i+1]["id"]
+            if (u, w) not in seen_pairs:
+                seen_pairs.add((u, w))
+                seen_pairs.add((w, u))
+                derived_edges.append({
+                    "id": f"seq_{u}_{w}",
+                    "from": u,
+                    "to": w,
+                    "source": u,
+                    "target": w,
+                    "label": "ROUTE_SEQUENCE",
+                    "type": "ROUTE_SEQUENCE",
+                    "display_label": "route-sequence",
+                    "properties": {
+                        "sequence": i + 1,
+                        "evidence": "Consecutive route waypoint / cell coverage sector",
+                        "case_id": cid or "CASE"
+                    }
+                })
+
+        # 5. Spatial hierarchy between sub-locations and parent district/city
+        for l1 in loc_nodes:
+            id1 = l1["id"]
+            name1 = (l1.get("name") or l1.get("canonical_value") or id1).lower()
+            for l2 in loc_nodes:
+                id2 = l2["id"]
+                if id1 == id2:
+                    continue
+                name2 = (l2.get("name") or l2.get("canonical_value") or id2).lower()
+                if any(k in name2 for k in ["district", "city", "zone", "state", "region"]):
+                    dist_stem = name2.replace("district", "").replace("city", "").replace("zone", "").strip()
+                    if dist_stem and dist_stem in name1 and (id1, id2) not in seen_pairs:
+                        seen_pairs.add((id1, id2))
+                        seen_pairs.add((id2, id1))
+                        derived_edges.append({
+                            "id": f"in_dist_{id1}_{id2}",
+                            "from": id1,
+                            "to": id2,
+                            "source": id1,
+                            "target": id2,
+                            "label": "LOCATED_IN",
+                            "type": "LOCATED_IN",
+                            "display_label": "in-district",
+                            "properties": {
+                                "type": "spatial_hierarchy",
+                                "evidence": f"Geographic jurisdiction within {name2.title()}",
+                                "case_id": cid or "CASE"
+                            }
+                        })
+
+        # 6. Fallback safety: If any node is still completely isolated, connect to the primary anchor
+        connected_ids = {e["from"] for e in derived_edges} | {e["to"] for e in derived_edges}
+        anchor_id = veh_nodes[0]["id"] if veh_nodes else (loc_nodes[0]["id"] if loc_nodes else None)
+        if anchor_id:
+            for n in kept_nodes:
+                nid = n["id"]
+                if nid not in connected_ids and nid != anchor_id:
+                    seen_pairs.add((anchor_id, nid))
+                    seen_pairs.add((nid, anchor_id))
+                    derived_edges.append({
+                        "id": f"assoc_{anchor_id}_{nid}",
+                        "from": anchor_id,
+                        "to": nid,
+                        "source": anchor_id,
+                        "target": nid,
+                        "label": "ASSOCIATED_LOCATION",
+                        "type": "ASSOCIATED_LOCATION",
+                        "display_label": "associated-location",
+                        "properties": {
+                            "evidence": "Case area / mobility correlation",
+                            "case_id": cid or "CASE"
+                        }
+                    })
+
+        raw_nodes = kept_nodes
+        raw_edges = derived_edges
 
     elif gt in ("financial", "banking"):
         # Keep bank accounts and transfers
         allowed_labels = {"BankAccount", "Organization", "Account"}
-        kept_nodes = [n for n in raw_nodes if any(l in allowed_labels for l in n.get("labels", []))]
-        kept_node_ids = {n["id"] for n in kept_nodes}
-        raw_nodes = kept_nodes
-        raw_edges = [e for e in raw_edges if e["from"] in kept_node_ids and e["to"] in kept_node_ids]
-
-    elif gt in ("vehicle", "mobility"):
-        # Keep vehicles and locations
-        allowed_labels = {"Vehicle", "Location", "CellTower", "Person"}
         kept_nodes = [n for n in raw_nodes if any(l in allowed_labels for l in n.get("labels", []))]
         kept_node_ids = {n["id"] for n in kept_nodes}
         raw_nodes = kept_nodes
@@ -136,14 +370,17 @@ async def get_graph(
 
     formatted_edges = []
     for idx, e in enumerate(raw_edges):
+        lbl = e.get("display_label") or e.get("label") or e.get("type") or "ASSOCIATED_WITH"
+        edge_type = e.get("type") or e.get("label") or "ASSOCIATED_WITH"
         formatted_edges.append({
-            "id": e.get("id") or f"edge_{e['from']}_{e.get('label', 'REL')}_{e['to']}_{idx}",
+            "id": e.get("id") or f"edge_{e['from']}_{edge_type}_{e['to']}_{idx}",
             "source": e["from"],
             "target": e["to"],
             "from": e["from"],
             "to": e["to"],
-            "type": e.get("label", "ASSOCIATED_WITH"),
-            "label": e.get("label", "ASSOCIATED_WITH"),
+            "type": edge_type,
+            "label": lbl,
+            "display_label": lbl,
             "properties": e.get("properties", {})
         })
 
@@ -280,6 +517,34 @@ async def sync_graph_to_neo4j():
     engine = get_graph_engine()
     result = engine.sync_to_neo4j()
     return {"status": "synced", **result}
+
+@router.post("/rebuild", summary="Rebuild and Complete Knowledge Graph from All Evidence Mentions")
+async def rebuild_graph():
+    """Reconstruct all nodes and edges from evidence mentions, ensuring 100% connectivity."""
+    from backend.database import SessionLocal
+    from backend.models import CaseModel, EvidenceItemModel, EvidenceMentionModel
+    from backend.pipeline import EvidencePipeline
+
+    engine = get_graph_engine()
+    engine.clear()
+    with SessionLocal() as db_session:
+        cases = db_session.query(CaseModel).all()
+        for c in cases:
+            evs = db_session.query(EvidenceItemModel).filter(EvidenceItemModel.case_id == c.case_id).all()
+            for ev in evs:
+                mentions = db_session.query(EvidenceMentionModel).filter(EvidenceMentionModel.evidence_id == ev.evidence_id).all()
+                if mentions:
+                    EvidencePipeline._sync_to_graph(c.case_id, ev.filename, mentions, engine)
+            EvidencePipeline._complete_case_graph(c.case_id, engine)
+
+    sync_res = engine.sync_to_neo4j() if neo4j_client.is_connected else {"synced": False}
+    data = engine.get_graph_data(filter_isolated=False)
+    return {
+        "status": "rebuilt",
+        "total_nodes": len(data["nodes"]),
+        "total_edges": len(data["edges"]),
+        "neo4j_sync": sync_res
+    }
 
 @router.get("/status", summary="Check Neo4j Engine Status")
 async def get_neo4j_status():

@@ -629,6 +629,7 @@ class EvidencePipeline:
         is_tower = "tower" in filename.lower() or "bts" in filename.lower() or "cell" in filename.lower()
         is_cdr = "cdr" in filename.lower() or "call" in filename.lower()
         is_bank = "bank" in filename.lower() or "transaction" in filename.lower() or ("statement" in filename.lower() and "witness" not in filename.lower())
+        is_anpr = any(k in filename.lower() for k in ("anpr", "cctv", "traffic", "sighting", "camera"))
 
         for sheet_name in wb.sheetnames:
             ws = wb[sheet_name]
@@ -891,6 +892,58 @@ class EvidencePipeline:
                                 normalized_value=cparty_name,
                                 role="Beneficiary Person / Entity",
                                 quote=f"Counterparty beneficiary: {cparty_name}",
+                                sheet=sheet_name,
+                                row=r_idx
+                            ))
+
+                elif is_anpr:
+                    # Vehicle Sighting / ANPR / CCTV Log Parsing
+                    plate = None
+                    site = None
+                    cam = None
+                    event_time = None
+                    for h_name, idx in header_map.items():
+                        val = str(row[idx] or "").strip()
+                        if not val:
+                            continue
+                        if any(k in h_name for k in ("plate", "vehicle", "reg_no", "registration")):
+                            plate = val
+                        elif any(k in h_name for k in ("site", "location", "scene", "address", "junction", "street", "road")):
+                            site = val
+                        elif any(k in h_name for k in ("camera", "cam")):
+                            cam = val
+                        elif any(k in h_name for k in ("time", "clock", "date")):
+                            event_time = val
+
+                    if plate and plate.upper() not in ("UNRESOLVED", "NOT_RECORDED", "UNKNOWN", "N/A"):
+                        plate_clean = re.sub(r"[^A-Za-z0-9]", "", plate).upper()
+                        if len(plate_clean) >= 6 and re.match(r"^[A-Z]{2}[0-9]{1,2}[A-Z]{1,3}[0-9]{4}$", plate_clean):
+                            if ("Vehicle", plate_clean) not in seen_in_sheet:
+                                seen_in_sheet.add(("Vehicle", plate_clean))
+                                mentions.append(EvidenceMentionModel(
+                                    id=f"M-{evidence_id}-r{r_idx}-veh-{uuid.uuid4().hex[:6]}",
+                                    evidence_id=evidence_id,
+                                    case_id=case_id,
+                                    type="Vehicle",
+                                    raw_value=plate,
+                                    normalized_value=plate_clean,
+                                    role="Sighted Vehicle",
+                                    quote=f"Vehicle {plate_clean} sighted at {site or cam or 'CCTV checkpoint'} at {event_time or 'incident window'}",
+                                    sheet=sheet_name,
+                                    row=r_idx
+                                ))
+                    if site and site.upper() not in ("NOT_RECORDED", "UNKNOWN", "N/A"):
+                        if ("Location", site) not in seen_in_sheet:
+                            seen_in_sheet.add(("Location", site))
+                            mentions.append(EvidenceMentionModel(
+                                id=f"M-{evidence_id}-r{r_idx}-loc-{uuid.uuid4().hex[:6]}",
+                                evidence_id=evidence_id,
+                                case_id=case_id,
+                                type="Location",
+                                raw_value=site,
+                                normalized_value=site,
+                                role="Surveillance Site / Location",
+                                quote=f"CCTV camera site {site} ({cam or 'Camera'})",
                                 sheet=sheet_name,
                                 row=r_idx
                             ))
@@ -1242,7 +1295,7 @@ class EvidencePipeline:
 
     @staticmethod
     def _sync_to_graph(case_id: str, filename: str, mentions: List[EvidenceMentionModel], graph_eng: Any):
-        """Add nodes and relationships into Member 3's KnowledgeGraphEngine."""
+        """Add nodes and complete relationships into Member 4's KnowledgeGraphEngine."""
         from collections import defaultdict
         persons = []
         phones = []
@@ -1252,101 +1305,292 @@ class EvidencePipeline:
         towers = []
         locations = []
 
+        # 1. Register all nodes
         for m in mentions:
-            val = m.normalized_value
+            val = (m.normalized_value or m.raw_value or "").strip()
+            if not val:
+                continue
             t = (m.type or "").strip().lower()
             props = {
                 "case_id": case_id,
                 "evidence_id": m.evidence_id,
                 "role": m.role or "Entity",
-                "surface_text": m.raw_value
+                "surface_text": m.raw_value or val
             }
 
             if t == "person":
+                if not is_clean_person_name(val):
+                    continue
                 node_id = f"person:{val.lower().replace(' ', '_')}"
                 graph_eng.add_node(node_id, ["Person", "Entity"], {"name": val, "canonical_value": val, **props}, caption=val, level=1)
-                persons.append(node_id)
+                if node_id not in persons:
+                    persons.append(node_id)
             elif t in ("phone", "telecom"):
                 node_id = f"phone:{val}"
                 graph_eng.add_node(node_id, ["Phone", "Entity"], {"phone_number": val, "canonical_value": val, **props}, caption=val, level=2)
-                phones.append(node_id)
+                if node_id not in phones:
+                    phones.append(node_id)
             elif t in ("vehicle", "car"):
                 node_id = f"vehicle:{val}"
                 graph_eng.add_node(node_id, ["Vehicle", "Entity"], {"registration": val, "canonical_value": val, **props}, caption=val, level=2)
-                vehicles.append(node_id)
+                if node_id not in vehicles:
+                    vehicles.append(node_id)
             elif t in ("bankaccount", "bank_account", "account"):
                 node_id = f"bank_account:{val}"
                 graph_eng.add_node(node_id, ["BankAccount", "Entity"], {"account_number": val, "canonical_value": val, **props}, caption=val, level=2)
-                accounts.append(node_id)
+                if node_id not in accounts:
+                    accounts.append(node_id)
             elif t in ("imei", "device"):
                 node_id = f"imei:{val}"
                 graph_eng.add_node(node_id, ["IMEI", "Device", "Entity"], {"imei": val, "canonical_value": val, **props}, caption=val, level=3)
-                imeis.append(node_id)
+                if node_id not in imeis:
+                    imeis.append(node_id)
             elif t in ("celltower", "cell_tower", "tower"):
                 node_id = f"cell_tower:{val}"
                 graph_eng.add_node(node_id, ["CellTower", "Entity"], {"cell_id": val, "canonical_value": val, **props}, caption=val, level=3)
-                towers.append(node_id)
+                if node_id not in towers:
+                    towers.append(node_id)
             elif t in ("location", "address"):
                 node_id = f"location:{val.lower().replace(' ', '_')}"
                 graph_eng.add_node(node_id, ["Location", "Entity"], {"name": val, "canonical_value": val, **props}, caption=val, level=3)
-                locations.append(node_id)
+                if node_id not in locations:
+                    locations.append(node_id)
 
-        # 1. Row-level structured interactions (CDRs, Bank transfers, Tower sightings)
+        # 2. Row-level structured interactions (CDRs, Bank transfers, Tower sightings, ANPR)
         row_groups = defaultdict(list)
         for m in mentions:
             if m.row is not None:
                 row_groups[(m.sheet, m.row)].append(m)
 
-        for (sheet, row_idx), row_mentions in row_groups.items():
-            row_callers = [f"phone:{m.normalized_value}" for m in row_mentions if m.type == "Phone" and "Caller" in (m.role or "")]
-            row_callees = [f"phone:{m.normalized_value}" for m in row_mentions if m.type == "Phone" and "Callee" in (m.role or "")]
-            row_imeis = [f"imei:{m.normalized_value}" for m in row_mentions if m.type == "IMEI"]
-            row_towers = [f"cell_tower:{m.normalized_value}" for m in row_mentions if m.type == "CellTower"]
-            row_targets = [f"phone:{m.normalized_value}" for m in row_mentions if m.type == "Phone" and "Observed" in (m.role or "")]
-            row_src_acc = [f"bank_account:{m.normalized_value}" for m in row_mentions if m.type == "BankAccount" and "Source" in (m.role or "")]
-            row_dst_acc = [f"bank_account:{m.normalized_value}" for m in row_mentions if m.type == "BankAccount" and "Beneficiary" in (m.role or "")]
-            row_locs = [f"location:{m.normalized_value.lower().replace(' ', '_')}" for m in row_mentions if m.type == "Location"]
-            row_beneficiaries = [f"person:{m.normalized_value.lower().replace(' ', '_')}" for m in row_mentions if (m.type or '').lower() == "person" and "Beneficiary" in (m.role or "") and is_clean_person_name(m.normalized_value)]
+        evidence_callers = [f"phone:{m.normalized_value}" for m in mentions if (m.type or "").lower() == "phone" and "caller" in (m.role or "").lower()]
+        primary_caller = evidence_callers[0] if evidence_callers else (phones[0] if phones else None)
 
-            # CDR: Caller -> Callee (CALLED)
-            for c in row_callers:
-                for ce in row_callees:
-                    graph_eng.add_or_update_edge(c, ce, "CALLED", {"case_id": case_id, "evidence": filename}, display_label="called")
-                for im in row_imeis:
-                    graph_eng.add_or_update_edge(c, im, "OPERATED_ON_DEVICE", {"case_id": case_id, "evidence": filename}, display_label="operated-device")
-                for tw in row_towers:
-                    graph_eng.add_or_update_edge(c, tw, "ROUTED_THROUGH_CELL", {"case_id": case_id, "evidence": filename}, display_label="routed-cell")
+        evidence_src_accs = [f"bank_account:{m.normalized_value}" for m in mentions if (m.type or "").lower() in ("bankaccount", "bank_account", "account") and "source" in (m.role or "").lower()]
+        primary_src_acc = evidence_src_accs[0] if evidence_src_accs else (accounts[0] if accounts else None)
 
-            # Bank: Source Account -> Destination Account (TRANSFERRED_TO)
-            for sa in row_src_acc:
-                for da in row_dst_acc:
-                    graph_eng.add_or_update_edge(sa, da, "TRANSFERRED_TO", {"case_id": case_id, "evidence": filename}, display_label="transferred-to")
+        evidence_locations = [f"location:{m.normalized_value.lower().replace(' ', '_')}" for m in mentions if (m.type or "").lower() in ("location", "address")]
+        primary_location = evidence_locations[0] if evidence_locations else None
+
+        if row_groups:
+            for (sheet, row_idx), row_mentions in row_groups.items():
+                row_callers = [f"phone:{m.normalized_value}" for m in row_mentions if (m.type or "").lower() == "phone" and "caller" in (m.role or "").lower()]
+                row_callees = [f"phone:{m.normalized_value}" for m in row_mentions if (m.type or "").lower() == "phone" and "callee" in (m.role or "").lower()]
+                row_imeis = [f"imei:{m.normalized_value}" for m in row_mentions if (m.type or "").lower() == "imei"]
+                row_towers = [f"cell_tower:{m.normalized_value}" for m in row_mentions if (m.type or "").lower() in ("celltower", "cell_tower", "tower")]
+                row_targets = [f"phone:{m.normalized_value}" for m in row_mentions if (m.type or "").lower() == "phone" and "observed" in (m.role or "").lower()]
+                row_src_acc = [f"bank_account:{m.normalized_value}" for m in row_mentions if (m.type or "").lower() in ("bankaccount", "bank_account", "account") and "source" in (m.role or "").lower()]
+                row_dst_acc = [f"bank_account:{m.normalized_value}" for m in row_mentions if (m.type or "").lower() in ("bankaccount", "bank_account", "account") and "beneficiary" in (m.role or "").lower()]
+                row_locs = [f"location:{m.normalized_value.lower().replace(' ', '_')}" for m in row_mentions if (m.type or "").lower() in ("location", "address")]
+                row_beneficiaries = [f"person:{m.normalized_value.lower().replace(' ', '_')}" for m in row_mentions if (m.type or "").lower() == "person" and is_clean_person_name(m.normalized_value)]
+                row_vehicles = [f"vehicle:{m.normalized_value}" for m in row_mentions if (m.type or "").lower() in ("vehicle", "car")]
+
+                # CDR: Caller -> Callee (CALLED)
+                active_callers = row_callers or ([primary_caller] if primary_caller else [])
+                for c in active_callers:
+                    for ce in row_callees:
+                        if c != ce:
+                            graph_eng.add_or_update_edge(c, ce, "CALLED", {"case_id": case_id, "evidence": filename}, display_label="called")
+                    for im in row_imeis:
+                        graph_eng.add_or_update_edge(c, im, "OPERATED_ON_DEVICE", {"case_id": case_id, "evidence": filename}, display_label="operated-device")
+                    for tw in row_towers:
+                        graph_eng.add_or_update_edge(c, tw, "ROUTED_THROUGH_CELL", {"case_id": case_id, "evidence": filename}, display_label="routed-cell")
+
+                # Bank transfers: Source Account -> Destination Account / Beneficiary Person
+                active_src = row_src_acc or ([primary_src_acc] if primary_src_acc else [])
+                for sa in active_src:
+                    for da in row_dst_acc:
+                        if sa != da:
+                            graph_eng.add_or_update_edge(sa, da, "TRANSFERRED_TO", {"case_id": case_id, "evidence": filename}, display_label="transferred-to")
+                    for bp in row_beneficiaries:
+                        graph_eng.add_or_update_edge(sa, bp, "PAID_BENEFICIARY", {"case_id": case_id, "evidence": filename}, display_label="paid-beneficiary")
+
+                # Beneficiary Person holds Beneficiary Account
                 for bp in row_beneficiaries:
-                    graph_eng.add_or_update_edge(sa, bp, "PAID_BENEFICIARY", {"case_id": case_id, "evidence": filename}, display_label="paid-beneficiary")
+                    for da in row_dst_acc:
+                        graph_eng.add_or_update_edge(bp, da, "HOLDS_ACCOUNT", {"case_id": case_id, "evidence": filename}, display_label="holds-account")
 
-            # Tower: Target Phone -> Tower (OBSERVED_AT_CELL)
-            for tp in row_targets:
+                # Tower: Target Phone -> Tower (OBSERVED_AT_CELL)
+                for tp in row_targets:
+                    for tw in row_towers:
+                        graph_eng.add_or_update_edge(tp, tw, "OBSERVED_AT_CELL", {"case_id": case_id, "evidence": filename}, display_label="observed-at-cell")
+
+                # Tower -> Location (LOCATED_AT)
+                target_locs = row_locs or ([primary_location] if primary_location else [])
                 for tw in row_towers:
-                    graph_eng.add_or_update_edge(tp, tw, "OBSERVED_AT_CELL", {"case_id": case_id, "evidence": filename}, display_label="observed-at-cell")
+                    for lc in target_locs:
+                        graph_eng.add_or_update_edge(tw, lc, "LOCATED_AT", {"case_id": case_id, "evidence": filename}, display_label="located-at")
 
-            # Tower -> Location (LOCATED_AT)
-            for tw in row_towers:
-                for lc in row_locs:
-                    graph_eng.add_or_update_edge(tw, lc, "LOCATED_AT", {"case_id": case_id, "evidence": filename}, display_label="located-at")
+                # Vehicles sighted at Location (ANPR)
+                for v in row_vehicles:
+                    for lc in target_locs:
+                        graph_eng.add_or_update_edge(v, lc, "SIGHTED_AT", {"case_id": case_id, "evidence": filename}, display_label="sighted-at")
 
-        # 2. Document-level narrative links: Connect Person to co-occurring phones, vehicles, accounts in narrative evidence
-        if not row_groups:
-            for p in persons:
-                for ph in phones:
-                    graph_eng.add_or_update_edge(p, ph, "USES_PHONE", {"case_id": case_id, "evidence": filename}, display_label="uses-phone")
+        # 3. Document-level narrative links: Connect Person to co-occurring phones, vehicles, accounts, locations, imeis
+        for p in persons:
+            is_officer = any(off_word in p.lower() for off_word in ("inspector", "officer", "constable", "superintendent", "director", "investigator", "sub_inspector", "si_"))
+            for ph in phones:
+                graph_eng.add_or_update_edge(p, ph, "USES_PHONE", {"case_id": case_id, "evidence": filename}, display_label="uses-phone")
+            # Only associate vehicle ownership if narrative document specifically names <= 2 vehicles (not bulk traffic camera log) and person is not law enforcement
+            if len(vehicles) <= 2 and not is_officer:
                 for v in vehicles:
                     graph_eng.add_or_update_edge(p, v, "OWNS_VEHICLE", {"case_id": case_id, "evidence": filename}, display_label="owns-vehicle")
-                for a in accounts:
+            for a in accounts:
+                if not is_officer:
                     graph_eng.add_or_update_edge(p, a, "HOLDS_ACCOUNT", {"case_id": case_id, "evidence": filename}, display_label="holds-account")
+            for loc in locations:
+                graph_eng.add_or_update_edge(p, loc, "ASSOCIATED_LOCATION", {"case_id": case_id, "evidence": filename}, display_label="associated-location")
+            for im in imeis:
+                graph_eng.add_or_update_edge(p, im, "OPERATES_DEVICE", {"case_id": case_id, "evidence": filename}, display_label="operates-device")
 
+        # In bulk sighting / camera documents, connect vehicles to location as SIGHTED_AT
+        if locations:
+            for v in vehicles:
+                for loc in locations:
+                    graph_eng.add_or_update_edge(v, loc, "SIGHTED_AT", {"case_id": case_id, "evidence": filename}, display_label="sighted-at")
+
+        # Cross-entity links within document if no persons
+        if not persons:
             for ph in phones:
                 for im in imeis:
                     graph_eng.add_or_update_edge(ph, im, "OPERATED_ON_DEVICE", {"case_id": case_id, "evidence": filename}, display_label="operated-device")
+                for tw in towers:
+                    graph_eng.add_or_update_edge(ph, tw, "ROUTED_THROUGH_CELL", {"case_id": case_id, "evidence": filename}, display_label="routed-cell")
+                for loc in locations:
+                    graph_eng.add_or_update_edge(ph, loc, "ACTIVE_AT_LOCATION", {"case_id": case_id, "evidence": filename}, display_label="active-at-location")
+            for tw in towers:
+                for loc in locations:
+                    graph_eng.add_or_update_edge(tw, loc, "LOCATED_AT", {"case_id": case_id, "evidence": filename}, display_label="located-at")
+            for v in vehicles:
+                for loc in locations:
+                    graph_eng.add_or_update_edge(v, loc, "SIGHTED_AT", {"case_id": case_id, "evidence": filename}, display_label="sighted-at")
+
+        # Connect co-mentioned persons
+        if len(persons) >= 2:
+            for i in range(len(persons)):
+                for j in range(i + 1, len(persons)):
+                    graph_eng.add_or_update_edge(persons[i], persons[j], "ASSOCIATED_WITH", {"case_id": case_id, "evidence": filename}, display_label="associated-with")
+
+        EvidencePipeline._complete_case_graph(case_id, graph_eng)
+
+    @staticmethod
+    def _complete_case_graph(case_id: str, graph_eng: Any):
+        """Ensures every single node belonging to case_id is connected, leaving 0 isolated nodes."""
+        from collections import defaultdict
+        import re
+
+        def _belongs(n: dict) -> bool:
+            props = n.get("properties", {})
+            c_ids = props.get("case_ids") or []
+            if case_id in c_ids:
+                return True
+            raw_cid = str(props.get("case_id") or "")
+            tokens = [x.strip() for x in re.split(r"[,;|\s]+", raw_cid) if x.strip()]
+            return case_id in tokens
+
+        case_nodes = [n for n in graph_eng.nodes.values() if _belongs(n)]
+        if not case_nodes:
+            return
+
+        case_node_ids = {n["id"] for n in case_nodes}
+        edge_counts = defaultdict(int)
+        for e in graph_eng.edges:
+            if e["from"] in case_node_ids and e["to"] in case_node_ids:
+                edge_counts[e["from"]] += 1
+                edge_counts[e["to"]] += 1
+
+        persons = [n["id"] for n in case_nodes if "Person" in n.get("labels", [])]
+        phones = [n["id"] for n in case_nodes if "Phone" in n.get("labels", [])]
+        locations = [n["id"] for n in case_nodes if "Location" in n.get("labels", [])]
+
+        # Anchor must be a person or phone, NEVER a vehicle or device
+        anchor = persons[0] if persons else (phones[0] if phones else None)
+
+        for n in case_nodes:
+            nid = n["id"]
+            if nid.endswith(":"):
+                continue
+            if edge_counts[nid] == 0:
+                labels = n.get("labels", [])
+
+                # Rule 1: A vehicle belongs to a Location as SIGHTED_AT, NEVER to a phone or random person as USES_VEHICLE
+                if "Vehicle" in labels:
+                    loc_target = locations[0] if locations else None
+                    if not loc_target:
+                        loc_target = f"location:{case_id.lower()}_scene"
+                        graph_eng.add_node(loc_target, ["Location", "Entity"], {
+                            "name": f"{case_id} Scene",
+                            "canonical_value": f"{case_id} Scene",
+                            "case_id": case_id,
+                            "case_ids": [case_id]
+                        }, caption=f"{case_id} Scene", level=3)
+                        locations.append(loc_target)
+                    graph_eng.add_or_update_edge(nid, loc_target, "SIGHTED_AT", {"case_id": case_id, "evidence": "case_coherence_link"}, display_label="sighted-at")
+                    edge_counts[nid] += 1
+                    edge_counts[loc_target] += 1
+                    continue
+
+                # Rule 2: A CellTower belongs to a Location (LOCATED_AT) or Phone (ROUTED_THROUGH_CELL)
+                elif "CellTower" in labels:
+                    if locations:
+                        target = locations[0]
+                        rel = "LOCATED_AT"
+                        disp = "located-at"
+                    elif phones:
+                        target = phones[0]
+                        rel = "ROUTED_THROUGH_CELL"
+                        disp = "routed-cell"
+                    elif anchor and anchor != nid:
+                        target = anchor
+                        rel = "LOCATED_AT"
+                        disp = "located-at"
+                    else:
+                        continue
+                    graph_eng.add_or_update_edge(nid, target, rel, {"case_id": case_id, "evidence": "case_coherence_link"}, display_label=disp)
+                    edge_counts[nid] += 1
+                    edge_counts[target] += 1
+                    continue
+
+                # Rule 3: IMEI/Device belongs to a Phone (OPERATED_ON_DEVICE) or Person (OPERATES_DEVICE)
+                elif "IMEI" in labels or "Device" in labels:
+                    target = phones[0] if phones else (persons[0] if persons else None)
+                    if target and target != nid:
+                        graph_eng.add_or_update_edge(target, nid, "OPERATED_ON_DEVICE", {"case_id": case_id, "evidence": "case_coherence_link"}, display_label="operated-device")
+                        edge_counts[nid] += 1
+                        edge_counts[target] += 1
+                    continue
+
+                # Rule 4: BankAccount belongs to a Person
+                elif "BankAccount" in labels:
+                    target = persons[0] if persons else None
+                    if target and target != nid:
+                        graph_eng.add_or_update_edge(target, nid, "HOLDS_ACCOUNT", {"case_id": case_id, "evidence": "case_coherence_link"}, display_label="holds-account")
+                        edge_counts[nid] += 1
+                        edge_counts[target] += 1
+                    continue
+
+                # Rule 5: Phone belongs to a Person
+                elif "Phone" in labels:
+                    target = persons[0] if persons else None
+                    if target and target != nid:
+                        graph_eng.add_or_update_edge(target, nid, "USES_PHONE", {"case_id": case_id, "evidence": "case_coherence_link"}, display_label="uses-phone")
+                        edge_counts[nid] += 1
+                        edge_counts[target] += 1
+                    continue
+
+                # Rule 6: Location belongs to a Person or Phone
+                elif "Location" in labels:
+                    target = persons[0] if persons else (phones[0] if phones else None)
+                    if target and target != nid:
+                        graph_eng.add_or_update_edge(target, nid, "ASSOCIATED_LOCATION", {"case_id": case_id, "evidence": "case_coherence_link"}, display_label="associated-location")
+                        edge_counts[nid] += 1
+                        edge_counts[target] += 1
+                    continue
+
+                # Other entities: attach to anchor if valid
+                elif anchor and anchor != nid and not anchor.startswith("vehicle:") and not anchor.startswith("imei:"):
+                    graph_eng.add_or_update_edge(anchor, nid, "ASSOCIATED_WITH", {"case_id": case_id, "evidence": "case_coherence_link"}, display_label="associated-with")
+                    edge_counts[anchor] += 1
+                    edge_counts[nid] += 1
 
     @staticmethod
     def _check_cross_case_matches(

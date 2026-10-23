@@ -16,8 +16,16 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import sys
+import uvicorn.config
 
 
-def atlas_loop_factory(use_subprocess: bool = False) -> asyncio.AbstractEventLoop:
+def atlas_loop_factory(use_subprocess: bool = False) -> None:
     """Return the event loop uvicorn should use for this process."""
-    return asyncio.SelectorEventLoop()
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+
+# Register in uvicorn's LOOP_SETUPS map so uvicorn recognizes this loop string
+uvicorn.config.LOOP_SETUPS["atlas_loop:atlas_loop_factory"] = "atlas_loop:atlas_loop_factory"
+

@@ -523,7 +523,7 @@ export function GraphExplorerModule({ cases, selectedCase, setSelectedCase, open
   const hasInitializedViewportRef = useRef<boolean>(false);
   const primaryComponentCenterRef = useRef<{ x: number; y: number } | null>(null);
 
-  const [caseFilter, setCaseFilter] = useState<string>(selectedCase || '');
+  const [caseFilter, setCaseFilter] = useState<string>(() => selectedCase || (cases && cases.length > 0 ? cases[0].case_id : ''));
   const [graphType, setGraphType] = useState<string>('focused');
   const [limit, setLimit] = useState<number>(300);
 
@@ -623,8 +623,43 @@ export function GraphExplorerModule({ cases, selectedCase, setSelectedCase, open
       // Restore all nodes and edges to default appearance
       focusedNodeIdRef.current = null;
       focusedNeighborIdsRef.current = new Set();
-      nodesDs.update(rawNodes);
-      edgesDs.update(rawEdges);
+      selectedNodeRef.current = null;
+      selectedRelationshipRef.current = null;
+
+      const resetNodes = rawNodes.map(n => ({
+        ...n,
+        opacity: 1.0,
+        size: n.size,
+        borderWidth: n.borderWidth,
+        borderWidthSelected: n.borderWidthSelected,
+        color: {
+          background: n.color?.background,
+          border: n.color?.border,
+          highlight: n.color?.highlight,
+          hover: n.color?.hover
+        },
+        shadow: n.shadow,
+        label: nodeLabelMap.current[n.id] || n.label
+      }));
+      nodesDs.update(resetNodes);
+
+      const resetEdges = rawEdges.map(e => ({
+        ...e,
+        width: e.width || 1.0,
+        color: e.color,
+        label: showEdgeLabels ? (edgeLabelMap.current[e.id] || '') : '',
+        font: {
+          ...e.font,
+          color: showEdgeLabels ? (isLight ? '#334155' : '#E2E8F0') : 'transparent',
+          background: showEdgeLabels ? (isLight ? 'rgba(255,255,255,0.94)' : 'rgba(15,23,42,0.92)') : 'transparent',
+          strokeWidth: showEdgeLabels ? 2 : 0
+        }
+      }));
+      edgesDs.update(resetEdges);
+
+      if (networkRef.current) {
+        networkRef.current.unselectAll();
+      }
       networkRef.current?.redraw();
       return;
     }
@@ -667,7 +702,7 @@ export function GraphExplorerModule({ cases, selectedCase, setSelectedCase, open
 
     const edgeUpdates = rawEdges.map(e => {
       const isConnecting = connectingEdgeIds.has(e.id);
-      const edgeLabel = isConnecting ? (edgeLabelMap.current[e.id] || e.label || '') : (showEdgeLabels ? (edgeLabelMap.current[e.id] || e.label || '') : '');
+      const edgeLabel = isConnecting ? (edgeLabelMap.current[e.id] || '') : (showEdgeLabels ? (edgeLabelMap.current[e.id] || '') : '');
       return {
         id: e.id,
         width: isConnecting ? Math.max(e.width || 1.8, 2.8) : 1.0,
@@ -677,14 +712,22 @@ export function GraphExplorerModule({ cases, selectedCase, setSelectedCase, open
           : { color: isLight ? 'rgba(148, 163, 184, 0.08)' : 'rgba(100, 116, 139, 0.08)' },
         font: {
           ...e.font,
-          color: isConnecting ? (isLight ? '#0F172A' : '#E2E8F0') : 'transparent',
-          background: isConnecting ? (isLight ? 'rgba(255,255,255,0.94)' : 'rgba(15,23,42,0.92)') : 'transparent'
+          color: isConnecting ? (isLight ? '#0F172A' : '#E2E8F0') : (showEdgeLabels ? (isLight ? '#334155' : '#E2E8F0') : 'transparent'),
+          background: isConnecting ? (isLight ? 'rgba(255,255,255,0.94)' : 'rgba(15,23,42,0.92)') : (showEdgeLabels ? (isLight ? 'rgba(255,255,255,0.94)' : 'rgba(15,23,42,0.92)') : 'transparent'),
+          strokeWidth: isConnecting || showEdgeLabels ? 2 : 0
         }
       };
     });
     edgesDs.update(edgeUpdates);
     networkRef.current?.redraw();
   }, [theme, showAllLabels, showEdgeLabels]);
+
+  // Whenever inspection details are closed (selectedNode / selectedRelationship cleared), restore normal graph display
+  useEffect(() => {
+    if (!selectedNode && !selectedRelationship) {
+      applyNeighborhoodHighlight(null);
+    }
+  }, [selectedNode, selectedRelationship, applyNeighborhoodHighlight]);
 
   const focusNode = useCallback((node: GraphNode) => {
     setSelectedNode(node);
@@ -733,8 +776,14 @@ export function GraphExplorerModule({ cases, selectedCase, setSelectedCase, open
   }, [fetchGraph]);
 
   useEffect(() => {
-    setCaseFilter(selectedCase || '');
-  }, [selectedCase]);
+    if (selectedCase) {
+      setCaseFilter(selectedCase);
+    } else if (cases && cases.length > 0) {
+      const defaultCase = cases[0].case_id;
+      setCaseFilter(defaultCase);
+      setSelectedCase(defaultCase);
+    }
+  }, [selectedCase, cases, setSelectedCase]);
 
   // Expand 1-Hop Neighbors of selected node
   const handleExpandNeighbors = async () => {
@@ -873,12 +922,22 @@ export function GraphExplorerModule({ cases, selectedCase, setSelectedCase, open
     // Filter nodes:
     // 1. By default, hide Case & Evidence nodes unless showCaseNodes is enabled
     // 2. Hide entities whose primary label is in hiddenTypes
+    // 3. Strictly enforce graphType matching entities (e.g. vehicle view only shows Vehicle and Location)
     const visibleGraphNodes = (graphNodes || []).filter(n => {
       if (!n || !n.id) return false;
       const isCaseOrEvidence = n.labels?.some(l => ['Case', 'SourceRecord', 'Document', 'Exhibit'].includes(l));
       if (!showCaseNodes && isCaseOrEvidence) return false;
-      const primaryLabel = n.labels?.[0];
-      if (primaryLabel && hiddenTypes.has(primaryLabel)) return false;
+      if (n.labels?.some(l => hiddenTypes.has(l))) return false;
+      if (graphType === 'vehicle') {
+        const isMatch = n.labels?.some(l => ['Vehicle', 'Location'].includes(l));
+        if (!isMatch) return false;
+      } else if (graphType === 'person') {
+        const isMatch = n.labels?.some(l => ['Person', 'Phone', 'Call'].includes(l));
+        if (!isMatch) return false;
+      } else if (graphType === 'financial') {
+        const isMatch = n.labels?.some(l => ['BankAccount', 'Organization', 'Account'].includes(l));
+        if (!isMatch) return false;
+      }
       return true;
     });
     const visibleNodeIdSet = new Set(visibleGraphNodes.map(n => n.id));
@@ -1014,6 +1073,7 @@ export function GraphExplorerModule({ cases, selectedCase, setSelectedCase, open
         shape: 'circularImage', // Circular node with centered white SVG icon
         image: getEntityIconDataUri(category),
         size: nodeSize,
+        opacity: 1.0,
         x: isStructured && sPos ? sPos.x : undefined,
         y: isStructured && sPos ? sPos.y : undefined,
         physics: !isStructured,
@@ -1170,12 +1230,12 @@ export function GraphExplorerModule({ cases, selectedCase, setSelectedCase, open
           hover: isLight ? '#0F172A' : '#38BDF8'
         },
         font: {
-          color: isLight ? '#334155' : '#E2E8F0',
+          color: showEdgeLabels ? (isLight ? '#334155' : '#E2E8F0') : 'transparent',
           size: 10.5,
           face: 'Inter, system-ui, sans-serif',
-          strokeWidth: isLight ? 2 : 2,
+          strokeWidth: showEdgeLabels ? 2 : 0,
           strokeColor: isLight ? '#FFFFFF' : '#0F172A',
-          background: isLight ? 'rgba(255,255,255,0.94)' : 'rgba(15,23,42,0.92)',
+          background: showEdgeLabels ? (isLight ? 'rgba(255,255,255,0.94)' : 'rgba(15,23,42,0.92)') : 'transparent',
           align: 'horizontal'
         },
         smooth: smoothConfig
@@ -1333,24 +1393,18 @@ export function GraphExplorerModule({ cases, selectedCase, setSelectedCase, open
         const pos = positions[n.id];
         if (!pos) continue;
 
-        const labelText = nodeLabelMap.current[n.id];
-        if (!labelText) continue;
+        let labelText = nodeLabelMap.current[n.id];
+        if (!labelText) {
+          labelText = n.name || n.label || n.id;
+        }
 
         const isSelected = n.id === selNodeId;
         const isMatched = matchingNodeIdsRef.current.has(n.id);
         const isNeighbor = neighborIds.has(n.id);
         const isKey = keyNodeIdsRef.current.has(n.id);
-        const currentScale = net.getScale();
 
-        // Controlled label display: In structured mode, show for all nodes; in investigation, selective or toggled
-        const shouldShowLabel =
-          isStructured ||
-          showAllLabels ||
-          isSelected ||
-          (hasFocus && isNeighbor) ||
-          isKey ||
-          isMatched ||
-          currentScale >= 1.15;
+        // Every node in the graph always has a clear, visible label pill
+        const shouldShowLabel = true;
 
         if (!shouldShowLabel) continue;
 
@@ -1433,12 +1487,87 @@ export function GraphExplorerModule({ cases, selectedCase, setSelectedCase, open
       const edgeId = params.edge;
       if (!showEdgeLabels && selectedRelationshipRef.current?.id !== edgeId) {
         const raw = rawEdgesRef.current.find(e => e.id === edgeId);
-        edgesDataSet.update({
-          id: edgeId,
-          label: '',
-          width: raw?.width || 1.4,
-          color: raw?.color || { color: edgeColor }
-        });
+        const isConnecting = Boolean(
+          focusedNodeIdRef.current &&
+          raw &&
+          (raw.from === focusedNodeIdRef.current || raw.to === focusedNodeIdRef.current)
+        );
+        if (!isConnecting) {
+          edgesDataSet.update({
+            id: edgeId,
+            label: '',
+            width: raw?.width || 1.4,
+            color: raw?.color || { color: edgeColor },
+            font: {
+              color: 'transparent',
+              background: 'transparent',
+              strokeWidth: 0
+            }
+          });
+        }
+      }
+    });
+
+    // Hover Node: Show relationships on all edges connected to the hovered node
+    net.on('hoverNode', (params: any) => {
+      const nodeId = params.node;
+      const rawEdges = rawEdgesRef.current;
+      const isLight = theme !== 'dark';
+
+      const connectingEdgeUpdates: any[] = [];
+      rawEdges.forEach(e => {
+        if (e.from === nodeId || e.to === nodeId) {
+          const lbl = edgeLabelMap.current[e.id] || '';
+          connectingEdgeUpdates.push({
+            id: e.id,
+            label: lbl,
+            width: Math.max(e.width || 1.8, 2.8),
+            color: { color: isLight ? '#0F172A' : '#38BDF8', highlight: '#F59E0B' },
+            font: {
+              ...e.font,
+              color: isLight ? '#0F172A' : '#E2E8F0',
+              background: isLight ? 'rgba(255,255,255,0.96)' : 'rgba(15,23,42,0.94)',
+              strokeWidth: 2
+            }
+          });
+        }
+      });
+      if (connectingEdgeUpdates.length > 0) {
+        edgesDataSet.update(connectingEdgeUpdates);
+      }
+    });
+
+    // Blur Node: Hide relationship labels on connected edges unless the node is actively inspected
+    net.on('blurNode', (params: any) => {
+      const nodeId = params.node;
+      // If this node is currently selected/inspected or global showEdgeLabels is on, do not hide
+      const isSelected = selectedNodeRef.current?.id === nodeId;
+      if (isSelected || showEdgeLabels) return;
+
+      const rawEdges = rawEdgesRef.current;
+      const blurEdgeUpdates: any[] = [];
+      rawEdges.forEach(e => {
+        if (e.from === nodeId || e.to === nodeId) {
+          // Keep visible if connected to currently selected node
+          const connectedToSelected = selectedNodeRef.current && (e.from === selectedNodeRef.current.id || e.to === selectedNodeRef.current.id);
+          if (!connectedToSelected) {
+            blurEdgeUpdates.push({
+              id: e.id,
+              label: '',
+              width: e.width || 1.0,
+              color: e.color,
+              font: {
+                ...e.font,
+                color: 'transparent',
+                background: 'transparent',
+                strokeWidth: 0
+              }
+            });
+          }
+        }
+      });
+      if (blurEdgeUpdates.length > 0) {
+        edgesDataSet.update(blurEdgeUpdates);
       }
     });
 
@@ -1468,8 +1597,14 @@ export function GraphExplorerModule({ cases, selectedCase, setSelectedCase, open
           edgesDataSet.update(rawEdgesRef.current.map(e => ({
             id: e.id,
             width: e.id === targetEdgeId ? 3.2 : 1.0,
-            label: e.id === targetEdgeId ? (edgeLabelMap.current[e.id] || e.label || '') : (showEdgeLabels ? (edgeLabelMap.current[e.id] || e.label || '') : ''),
-            color: e.id === targetEdgeId ? { color: '#F59E0B' } : { color: isLightMode ? 'rgba(148, 163, 184, 0.08)' : 'rgba(100, 116, 139, 0.08)' }
+            label: e.id === targetEdgeId ? (edgeLabelMap.current[e.id] || '') : (showEdgeLabels ? (edgeLabelMap.current[e.id] || '') : ''),
+            color: e.id === targetEdgeId ? { color: '#F59E0B' } : { color: isLightMode ? 'rgba(148, 163, 184, 0.08)' : 'rgba(100, 116, 139, 0.08)' },
+            font: {
+              ...e.font,
+              color: e.id === targetEdgeId ? (isLightMode ? '#0F172A' : '#E2E8F0') : (showEdgeLabels ? (isLightMode ? '#334155' : '#E2E8F0') : 'transparent'),
+              background: e.id === targetEdgeId ? (isLightMode ? 'rgba(255,255,255,0.94)' : 'rgba(15,23,42,0.92)') : (showEdgeLabels ? (isLightMode ? 'rgba(255,255,255,0.94)' : 'rgba(15,23,42,0.92)') : 'transparent'),
+              strokeWidth: e.id === targetEdgeId || showEdgeLabels ? 2 : 0
+            }
           })));
           net.redraw();
         }
@@ -1573,11 +1708,13 @@ export function GraphExplorerModule({ cases, selectedCase, setSelectedCase, open
     const qLower = q.toLowerCase();
     let clientDetected: string | null = null;
     if (qLower.includes('cdr') || qLower.includes('call') || qLower.includes('phone graph') || qLower.includes('telecom')) {
-      clientDetected = 'cdr';
+      clientDetected = 'person';
     } else if (qLower.includes('person') || qLower.includes('suspect') || qLower.includes('people') || qLower.includes('connecting person')) {
       clientDetected = 'person';
     } else if (qLower.includes('financial') || qLower.includes('money') || qLower.includes('bank') || qLower.includes('transfer')) {
       clientDetected = 'financial';
+    } else if (qLower.includes('vehicle') || qLower.includes('car') || qLower.includes('location') || qLower.includes('scene')) {
+      clientDetected = 'vehicle';
     } else if (qLower.includes('all') || qLower.includes('full graph') || qLower.includes('reset') || qLower.includes('entire graph')) {
       clientDetected = 'all';
     }
@@ -1585,8 +1722,8 @@ export function GraphExplorerModule({ cases, selectedCase, setSelectedCase, open
     if (clientDetected && clientDetected !== graphType) {
       setGraphType(clientDetected);
       addToast(
-        clientDetected === 'cdr' ? 'AI Extractor: Filtered view to People & Calls' :
-        clientDetected === 'person' ? 'AI Extractor: Filtered view to Person Syndicate' :
+        clientDetected === 'person' ? 'AI Extractor: Filtered view to Person & Calls Network' :
+        clientDetected === 'vehicle' ? 'AI Extractor: Filtered view to Vehicles & Locations' :
         clientDetected === 'financial' ? 'AI Extractor: Filtered view to Financial Flows' :
         'AI Extractor: Restored full ecosystem graph',
         'ok'
@@ -1693,8 +1830,7 @@ export function GraphExplorerModule({ cases, selectedCase, setSelectedCase, open
         <section className="network-information-card">
           <h2>Investigation scope</h2>
           <label htmlFor="graph-case-filter">Case</label>
-          <select id="graph-case-filter" className="control" value={caseFilter} onChange={e => { setCaseFilter(e.target.value); setSelectedCase(e.target.value || null); }}>
-            <option value="">All visible cases</option>
+          <select id="graph-case-filter" className="control" value={caseFilter} onChange={e => { setCaseFilter(e.target.value); setSelectedCase(e.target.value); }}>
             {cases.map(c => <option key={c.case_id} value={c.case_id}>{c.case_name || c.case_id}</option>)}
           </select>
 
@@ -1726,10 +1862,9 @@ export function GraphExplorerModule({ cases, selectedCase, setSelectedCase, open
           <select id="graph-view-mode" className="control" value={graphType} onChange={e => setGraphType(e.target.value)}>
             <option value="focused">Focused View (Default)</option>
             <option value="all">Full Network View</option>
-            <option value="cdr">People & Calls View</option>
+            <option value="person">Person & Calls Network</option>
             <option value="vehicle">Vehicle & Location View</option>
             <option value="financial">Financial View</option>
-            <option value="case_context">Case Context View</option>
           </select>
 
           <label htmlFor="graph-search" style={{ marginTop: '10px' }}>Find in Network</label>
