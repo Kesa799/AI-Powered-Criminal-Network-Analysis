@@ -22,11 +22,15 @@ __pycache__/
 *.egg
 *.egg-info/
 dist/
+!member1/dist/
+!member1/dist/**
 build/
 eggs/
 parts/
 var/
 sdist/
+!member1/dist/
+!member1/dist/**
 develop-eggs/
 .installed.cfg
 
@@ -63,7 +67,12 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
-member1/dist/
+# member1/dist/
+!member1/dist/
+!member1/dist/** is tracked so cloud hosts (Render, Railway) don't need Node installed
+!member1/dist/
+!member1/dist/
+!member1/dist/****
 
 # 6. Runtime Evidence, Uploads & Output Data
 data/originals/*

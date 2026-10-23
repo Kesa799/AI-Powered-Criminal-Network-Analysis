@@ -12,10 +12,8 @@ import atlas_loop
 atlas_loop.atlas_loop_factory()
 LOOP_FACTORY = "atlas_loop:atlas_loop_factory"
 
-# The port is configurable so a second instance can serve the same database
-# and graph with a different LLM model. The provider's daily token budget is
-# per model, so two instances make the dataset ingestible at twice the rate.
-PORT = int(os.getenv("ATLAS_PORT", "8000"))
+# The port is configurable via PORT (Render, Heroku) or ATLAS_PORT.
+PORT = int(os.getenv("PORT", os.getenv("ATLAS_PORT", "8000")))
 HOST = os.getenv("ATLAS_HOST", "0.0.0.0")
 
 if __name__ == "__main__":

@@ -210,6 +210,38 @@ Once running:
 
 ---
 
+## ☁️ Deploy to Render (Free Cloud Hosting)
+
+This repository includes a [`render.yaml`](render.yaml) specification and pre-compiled production frontend assets in `member1/dist` for instant zero-configuration deployment on [Render](https://render.com).
+
+### Method 1: Using Render Blueprints (Recommended)
+1. Go to your [Render Dashboard](https://dashboard.render.com/).
+2. Click **New +** > **Blueprint**.
+3. Connect your GitHub repository: `https://github.com/Kesa799/AI-Powered-Criminal-Network-Analysis`.
+4. Render will automatically detect [`render.yaml`](render.yaml).
+5. Click **Apply**. Render will automatically provision and deploy the web service.
+
+### Method 2: Manual Web Service Setup
+1. On [Render Dashboard](https://dashboard.render.com/), click **New +** > **Web Service**.
+2. Select your repository: `AI-Powered-Criminal-Network-Analysis`.
+3. Configure the following settings:
+   - **Environment:** `Python 3`
+   - **Region:** Any (e.g. *Singapore* or *Frankfurt*)
+   - **Branch:** `main`
+   - **Build Command:** `pip install -r requirements.txt`
+   - **Start Command:** `python run.py`
+4. Add the following **Environment Variables** in the Render settings:
+   - `PYTHON_VERSION`: `3.11.9`
+   - `ENVIRONMENT`: `production`
+   - `SECRET_KEY`: *(click Generate or enter a secure random string)*
+   - `DATABASE_URL`: *(optional: your Supabase / PostgreSQL URL, or leave blank to use the built-in SQLite database)*
+   - `GROQ_API_KEY`: *(optional: your Groq API key for LLM extractions)*
+   - `LLM_PROVIDER`: `groq`
+   - `LLM_MODEL`: `openai/gpt-oss-120b`
+5. Click **Create Web Service**. Your service will build and go live at `https://<your-service-name>.onrender.com`.
+
+---
+
 ## 🔐 Demo Officer Credentials
 
 The database comes pre-configured with the following role-based access control (RBAC) officer credentials:
