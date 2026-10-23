@@ -45,14 +45,15 @@ class Neo4jClient:
                 self.uri,
                 auth=(self.user, self.password),
                 max_connection_lifetime=MAX_CONNECTION_LIFETIME_S,
-                connection_acquisition_timeout=30,
+                connection_acquisition_timeout=3.0,
+                connection_timeout=3.0,
             )
             self._driver.verify_connectivity()
             self._connected = True
             logger.info(f"Successfully connected to Neo4j at {self.uri}")
             return True
-        except Exception:
-            logger.info(f"Neo4j is not active at {self.uri}. Operating in high-speed in-memory graph mode.")
+        except Exception as e:
+            logger.info(f"Neo4j is not active at {self.uri} ({e}). Operating in high-speed in-memory graph mode.")
             self._connected = False
             return False
 

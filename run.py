@@ -2,6 +2,13 @@ import uvicorn
 import os
 import sys
 
+# Ensure immediate unbuffered console logging on Render/Linux
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
+
 # Ensure current project directory is in sys.path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -22,13 +29,13 @@ PORT = int(os.getenv("PORT", os.getenv("ATLAS_PORT", "8000")))
 HOST = os.getenv("ATLAS_HOST", "0.0.0.0")
 
 if __name__ == "__main__":
-    print("=" * 60)
-    print("  ATLAS Criminal Network Intelligence & Forensic Analysis API")
-    print("  Member 2: Backend, Database & Application Management")
-    print("=" * 60)
-    print(f"  Serving API & Frontend at: http://127.0.0.1:{PORT}")
-    print(f"  Interactive Swagger Docs at: http://127.0.0.1:{PORT}/docs")
-    print("=" * 60)
+    print("=" * 60, flush=True)
+    print("  ATLAS Criminal Network Intelligence & Forensic Analysis API", flush=True)
+    print("  Member 2: Backend, Database & Application Management", flush=True)
+    print("=" * 60, flush=True)
+    print(f"  Serving API & Frontend on {HOST}:{PORT}", flush=True)
+    print(f"  Interactive Swagger Docs at: http://{HOST}:{PORT}/docs", flush=True)
+    print("=" * 60, flush=True)
     uvicorn.run(
         "backend.main:app",
         host=HOST,
