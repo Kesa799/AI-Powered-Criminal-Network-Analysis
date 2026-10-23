@@ -835,16 +835,16 @@ export function GraphExplorerModule({ cases, selectedCase, setSelectedCase, open
     if (center) {
       networkRef.current.moveTo({
         position: center,
-        scale: 1.25,
+        scale: 0.90,
         animation: true
       });
     } else {
       const rawNodes = rawNodesRef.current;
       const keyNode = rawNodes.find(n => n.size > 18) || rawNodes[0];
       if (keyNode) {
-        networkRef.current.focus(keyNode.id, { scale: 1.25, animation: true });
+        networkRef.current.focus(keyNode.id, { scale: 0.90, animation: true });
       } else {
-        networkRef.current.moveTo({ position: { x: 0, y: 0 }, scale: 1.25, animation: true });
+        networkRef.current.moveTo({ position: { x: 0, y: 0 }, scale: 0.90, animation: true });
       }
     }
     addToast('Viewport centered on primary network at 100% zoom', 'ok');
@@ -1270,16 +1270,16 @@ export function GraphExplorerModule({ cases, selectedCase, setSelectedCase, open
         enabled: !isStructured && physicsEnabled,
         solver: 'forceAtlas2Based',
         forceAtlas2Based: {
-          gravitationalConstant: -70,
-          centralGravity: 0.015,
-          springLength: 95,
-          springConstant: 0.09,
-          damping: 0.50,
+          gravitationalConstant: -180,
+          centralGravity: 0.008,
+          springLength: 210,
+          springConstant: 0.04,
+          damping: 0.45,
           avoidOverlap: 1.0
         },
         stabilization: {
           enabled: !isStructured,
-          iterations: !isStructured ? 150 : 0,
+          iterations: !isStructured ? 260 : 0,
           updateInterval: 25,
           fit: false
         }
@@ -1669,16 +1669,16 @@ export function GraphExplorerModule({ cases, selectedCase, setSelectedCase, open
 
               net.moveTo({
                 position: { x: centerX, y: centerY },
-                scale: 1.25, // Comfortable, readable initial zoom
+                scale: 0.90, // Comfortable, readable overview of spaced network
                 animation: false
               });
             } catch {
-              net.focus(primaryHub.id, { scale: 1.25, animation: false });
+              net.focus(primaryHub.id, { scale: 0.90, animation: false });
             }
           } else {
             net.moveTo({
               position: { x: 0, y: 0 },
-              scale: 1.25,
+              scale: 0.90,
               animation: false
             });
           }
